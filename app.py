@@ -238,19 +238,6 @@ THIRD_PLACE_COMBINATION_MAP = {
     "CDEFGIJK": {"1A": "C", "1B": "G", "1D": "E", "1E": "D", "1G": "J", "1I": "F", "1K": "I", "1L": "K"},
 }
 
-BALANCED_OWNER_OVERRIDES = {
-    "Austria": "Player 2",
-    "Czechia": "Player 11",
-    "England": "Player 5",
-    "Ghana": "Player 3",
-    "Jordan": "Player 7",
-    "Qatar": "Player 4",
-    "Saudi Arabia": "Player 6",
-    "Scotland": "Player 9",
-    "South Africa": "Player 7",
-    "Sweden": "Player 1",
-}
-
 FALLBACK_STANDINGS = [
     {"group": "A", "team": "France", "played": 1, "won": 1, "drawn": 0, "lost": 0, "gf": 2, "gd": 2, "points": 3},
     {"group": "A", "team": "Spain", "played": 1, "won": 1, "drawn": 0, "lost": 0, "gf": 1, "gd": 1, "points": 3},
@@ -348,6 +335,9 @@ def render_styles() -> None:
                 padding: 0.72rem 0.8rem;
                 border-bottom: 1px solid rgba(148, 163, 184, 0.18);
             }
+            table.custom-table th.num-cell {
+                text-align: right;
+            }
             table.custom-table td {
                 padding: 0.72rem 0.8rem;
                 border-bottom: 1px solid rgba(226, 232, 240, 0.85);
@@ -428,7 +418,10 @@ def format_team_with_flag(team_name: str) -> str:
 
 
 def render_html_table(dataframe: pd.DataFrame, numeric_columns: set[str], table_class: str = "table-card") -> None:
-    headers = "".join(f"<th>{column}</th>" for column in dataframe.columns)
+    headers = "".join(
+        f'<th{" class=\"num-cell\"" if column in numeric_columns else ""}>{column}</th>'
+        for column in dataframe.columns
+    )
     body_rows = []
 
     for _, row in dataframe.iterrows():
@@ -460,23 +453,25 @@ def render_html_table(dataframe: pd.DataFrame, numeric_columns: set[str], table_
 
 
 @st.cache_data(show_spinner=False)
-def load_owners() -> pd.DataFrame:
-    owners = pd.read_csv(DATA_DIR / "owners.csv")
+def load_owners(file_mtime: float) -> pd.DataFrame:
+    owners_path = DATA_DIR / "owners.csv"
+    last_error = None
+
+    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            owners = pd.read_csv(owners_path, encoding=encoding)
+            break
+        except UnicodeDecodeError as error:
+            last_error = error
+    else:
+        raise last_error
+
     owners["team"] = owners["team"].apply(canonical_team_name)
     return owners.sort_values(["player", "team"]).reset_index(drop=True)
 
 
-def apply_balanced_owner_overrides(owners: pd.DataFrame) -> pd.DataFrame:
-    balanced_owners = owners.copy()
-    balanced_owners["player"] = balanced_owners.apply(
-        lambda row: BALANCED_OWNER_OVERRIDES.get(row["team"], row["player"]),
-        axis=1,
-    )
-    return balanced_owners.sort_values(["player", "team"]).reset_index(drop=True)
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_json(url: str) -> dict:
+@st.cache_data(show_spinner=False)
+def fetch_json(url: str, day_key: str) -> dict:
     with urlopen(url, timeout=8) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -496,6 +491,10 @@ def parse_denmark_kickoff(date_value: Optional[str], time_value: Optional[str]) 
         return kickoff.strftime("%Y-%m-%d"), kickoff.strftime("%H:%M")
     except ValueError:
         return date_value, time_value[:5]
+
+
+def current_day_key() -> str:
+    return datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
 
 
 def fallback_standings() -> pd.DataFrame:
@@ -524,9 +523,9 @@ def parse_standings_payload(payload: dict) -> pd.DataFrame:
     return pd.DataFrame(parsed_rows)
 
 
-def load_standings() -> tuple[pd.DataFrame, bool]:
+def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
     try:
-        payload = fetch_json(LIVE_TABLE_URL)
+        payload = fetch_json(LIVE_TABLE_URL, day_key)
         standings = parse_standings_payload(payload)
         if not standings.empty:
             return standings, True
@@ -536,7 +535,10 @@ def load_standings() -> tuple[pd.DataFrame, bool]:
 
 
 def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> pd.DataFrame:
-    merged = owners.merge(standings[["team", "points", "gf"]], on="team", how="left")
+    merged = owners.merge(standings[["team", "won", "drawn", "lost", "gf", "points"]], on="team", how="left")
+    merged["won"] = merged["won"].fillna(0).astype(int)
+    merged["drawn"] = merged["drawn"].fillna(0).astype(int)
+    merged["lost"] = merged["lost"].fillna(0).astype(int)
     merged["points"] = merged["points"].fillna(0).astype(int)
     merged["gf"] = merged["gf"].fillna(0).astype(int)
     merged["owner_points"] = merged["points"] + merged["gf"]
@@ -545,13 +547,17 @@ def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> p
         merged.groupby("player", as_index=False)
         .agg(
             Teams=("team", lambda teams: " ".join(flag_icon(team) for team in sorted(teams))),
+            W=("won", "sum"),
+            D=("drawn", "sum"),
+            L=("lost", "sum"),
+            GF=("gf", "sum"),
             Points=("owner_points", "sum"),
         )
         .rename(columns={"player": "Owner"})
-        .sort_values(["Points", "Owner"], ascending=[False, True])
+        .sort_values(["Points", "GF", "W", "Owner"], ascending=[False, False, False, True])
         .reset_index(drop=True)
     )
-    return league_table[["Owner", "Teams", "Points"]]
+    return league_table[["Owner", "Teams", "W", "D", "L", "GF", "Points"]]
 
 
 def build_group_tables(standings: pd.DataFrame, owner_lookup: dict[str, str]) -> dict[str, pd.DataFrame]:
@@ -663,7 +669,14 @@ def build_third_place_slot_assignments(
     return THIRD_PLACE_COMBINATION_MAP.get(qualified_group_letters, {})
 
 
-def resolve_playoff_slot(
+def format_team_or_placeholder(value: str, owner_lookup: dict[str, str], include_owner: bool) -> str:
+    if value in owner_lookup:
+        formatted_team = format_team_with_flag(value)
+        return f"{formatted_team} ({owner_lookup[value]})" if include_owner else formatted_team
+    return value
+
+
+def resolve_playoff_slot_raw(
     slot_code: str,
     group_rankings: dict[str, list[str]],
     third_place_assignments: dict[str, str],
@@ -672,14 +685,14 @@ def resolve_playoff_slot(
         position = int(slot_code[0]) - 1
         group_name = f"Group {slot_code[1]}"
         if group_name in group_rankings:
-            return format_team_with_flag(group_rankings[group_name][position])
+            return group_rankings[group_name][position]
         suffix = "st" if slot_code[0] == "1" else "nd"
         return f"{slot_code[0]}{suffix} of {group_name}"
 
     if re.fullmatch(r"3[A-L]+", slot_code):
         groups = [f"Group {group_letter}" for group_letter in slot_code[1:]]
         if len(groups) == 1 and groups[0] in group_rankings:
-            return format_team_with_flag(group_rankings[groups[0]][2])
+            return group_rankings[groups[0]][2]
         return f"Best 3rd from {' / '.join(groups)}"
 
     if re.fullmatch(r"3P1[A-L]", slot_code):
@@ -689,7 +702,7 @@ def resolve_playoff_slot(
         if assigned_group_letter:
             group_name = f"Group {assigned_group_letter}"
             if group_name in group_rankings:
-                return format_team_with_flag(group_rankings[group_name][2])
+                return group_rankings[group_name][2]
         return f"Best 3rd from {' / '.join(f'Group {group_letter}' for group_letter in pool_letters)}"
 
     if re.fullmatch(r"W\d{2,3}", slot_code):
@@ -704,22 +717,50 @@ def resolve_playoff_slot(
 def build_playoff_tables(
     standings: pd.DataFrame,
     group_rankings: dict[str, list[str]],
+    owner_lookup: dict[str, str],
 ) -> dict[str, pd.DataFrame]:
     round_tables: dict[str, list[dict]] = {}
     third_place_assignments = build_third_place_slot_assignments(standings, group_rankings)
 
     for match in PLAYOFF_MATCHES:
+        raw_team_1 = resolve_playoff_slot_raw(match["team_1"], group_rankings, third_place_assignments)
+        raw_team_2 = resolve_playoff_slot_raw(match["team_2"], group_rankings, third_place_assignments)
         round_tables.setdefault(match["round"], []).append(
             {
                 "Match": match["match"],
                 "Date": match["date"],
-                "Team 1": resolve_playoff_slot(match["team_1"], group_rankings, third_place_assignments),
-                "Team 2": resolve_playoff_slot(match["team_2"], group_rankings, third_place_assignments),
+                "Team 1": format_team_or_placeholder(raw_team_1, owner_lookup, include_owner=False),
+                "Team 2": format_team_or_placeholder(raw_team_2, owner_lookup, include_owner=False),
                 "City": match["city"],
             }
         )
 
     return {round_name: pd.DataFrame(rows) for round_name, rows in round_tables.items()}
+
+
+def build_playoff_fixture_table(
+    standings: pd.DataFrame,
+    group_rankings: dict[str, list[str]],
+    owner_lookup: dict[str, str],
+) -> pd.DataFrame:
+    third_place_assignments = build_third_place_slot_assignments(standings, group_rankings)
+    rows = []
+
+    for match in PLAYOFF_MATCHES:
+        raw_team_1 = resolve_playoff_slot_raw(match["team_1"], group_rankings, third_place_assignments)
+        raw_team_2 = resolve_playoff_slot_raw(match["team_2"], group_rankings, third_place_assignments)
+        rows.append(
+            {
+                "Date": match["date"],
+                "Time (Denmark)": "-",
+                "Team 1 (Owner)": format_team_or_placeholder(raw_team_1, owner_lookup, include_owner=True),
+                "Team 2 (Owner)": format_team_or_placeholder(raw_team_2, owner_lookup, include_owner=True),
+                "City": match["city"],
+                "Score": "-",
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def parse_games_payload(payload: dict, owner_lookup: dict[str, str]) -> pd.DataFrame:
@@ -766,9 +807,9 @@ def fallback_games(owner_lookup: dict[str, str]) -> pd.DataFrame:
     return games[["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]]
 
 
-def load_upcoming_fixtures(owner_lookup: dict[str, str]) -> tuple[pd.DataFrame, bool]:
+def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[pd.DataFrame, bool]:
     try:
-        payload = fetch_json(LIVE_SEASON_GAMES_URL)
+        payload = fetch_json(LIVE_SEASON_GAMES_URL, day_key)
         fixtures = parse_games_payload(payload, owner_lookup)
         if not fixtures.empty:
             today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
@@ -782,15 +823,22 @@ def load_upcoming_fixtures(owner_lookup: dict[str, str]) -> tuple[pd.DataFrame, 
 
 render_styles()
 
-owners = load_owners()
-owners = apply_balanced_owner_overrides(owners)
+owners_file_mtime = (DATA_DIR / "owners.csv").stat().st_mtime
+day_key = current_day_key()
+owners = load_owners(owners_file_mtime)
 owner_lookup = dict(zip(owners["team"], owners["player"]))
-standings, live_table_loaded = load_standings()
+standings, live_table_loaded = load_standings(day_key)
 owner_league_table = build_owner_league_table(owners, standings)
 group_tables = build_group_tables(standings, owner_lookup)
 group_rankings = build_group_rankings(standings)
-playoff_tables = build_playoff_tables(standings, group_rankings)
-upcoming_fixtures, live_fixtures_loaded = load_upcoming_fixtures(owner_lookup)
+playoff_tables = build_playoff_tables(standings, group_rankings, owner_lookup)
+playoff_fixtures = build_playoff_fixture_table(standings, group_rankings, owner_lookup)
+upcoming_fixtures, live_fixtures_loaded = load_upcoming_fixtures(owner_lookup, day_key)
+upcoming_fixtures = (
+    pd.concat([upcoming_fixtures, playoff_fixtures], ignore_index=True)
+    .sort_values(["Date", "Time (Denmark)", "City"])
+    .reset_index(drop=True)
+)
 
 st.markdown('<div class="title-wrap"><h1>TIA X World Cup 26</h1></div>', unsafe_allow_html=True)
 
@@ -798,7 +846,7 @@ left_column, right_column = st.columns([1.55, 1])
 
 with left_column:
     st.markdown('<div class="section-title">League Table</div>', unsafe_allow_html=True)
-    render_html_table(owner_league_table, {"Points"})
+    render_html_table(owner_league_table, {"W", "D", "L", "GF", "Points"})
 
 with right_column:
     st.markdown('<div class="section-title">Points Rules</div>', unsafe_allow_html=True)
@@ -877,5 +925,5 @@ for round_name, round_table in playoff_tables.items():
     render_html_table(round_table, {"Match"}, table_class="table-card")
 
 st.caption(
-    "Live standings and fixtures attempt to load from TheSportsDB's public World Cup feed. The app falls back to local sample data when that feed is unavailable."
+    "Owner assignments are read directly from owners.csv. Live standings and fixtures attempt to load from TheSportsDB's public World Cup feed and refresh once per day; the app falls back to local sample data when that feed is unavailable."
 )
