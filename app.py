@@ -23,6 +23,8 @@ LIVE_SEASON_GAMES_URL = "https://www.thesportsdb.com/api/v1/json/123/eventsseaso
 DATA_DIR = Path(__file__).resolve().parent
 CHAT_MESSAGES_PATH = DATA_DIR / "chat_messages.jsonl"
 DENMARK_TZ = ZoneInfo("Europe/Copenhagen")
+CHAT_OWNER_STATE_KEY = "chat_selected_owner"
+REFRESH_INTERVAL_SECONDS = 30
 
 TEAM_ALIASES = {
     "Bosnia-Herzegovina": "Bosnia and Herzegovina",
@@ -462,9 +464,21 @@ def render_styles() -> None:
                 box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
                 padding: 0.8rem 0.8rem 0.35rem;
             }
+            div[data-testid="stForm"] form,
+            div[data-testid="stForm"] fieldset {
+                border: none !important;
+                background: transparent !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                min-width: 0 !important;
+            }
+            div[data-testid="stForm"] legend {
+                display: none !important;
+            }
             div[data-baseweb="select"] span,
             div[data-baseweb="select"] input,
-            div[data-baseweb="select"] div {
+            div[data-baseweb="select"] div,
+            div[data-baseweb="select"] * {
                 color: #000 !important;
             }
             div[role="listbox"] div {
@@ -594,8 +608,9 @@ def parse_denmark_kickoff(date_value: Optional[str], time_value: Optional[str]) 
         return date_value, time_value[:5]
 
 
-def current_day_key() -> str:
-    return datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
+def current_refresh_key(interval_seconds: int) -> str:
+    now = datetime.now(DENMARK_TZ)
+    return f"{now.strftime('%Y-%m-%d')}-{int(now.timestamp() // interval_seconds)}"
 
 
 def load_chat_messages() -> list[dict]:
@@ -975,34 +990,109 @@ def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[
     return fallback_games(owner_lookup), False
 
 
+def load_live_dashboard_data(owners: pd.DataFrame, owner_lookup: dict[str, str]) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame], pd.DataFrame]:
+    refresh_key = current_refresh_key(REFRESH_INTERVAL_SECONDS)
+    standings, _live_table_loaded = load_standings(refresh_key)
+    owner_league_table = build_owner_league_table(owners, standings)
+    group_tables = build_group_tables(standings, owner_lookup)
+    group_rankings = build_group_rankings(standings)
+    playoff_tables = build_playoff_tables(standings, group_rankings, owner_lookup)
+    playoff_fixtures = build_playoff_fixture_table(standings, group_rankings, owner_lookup)
+    upcoming_fixtures, _live_games_loaded = load_upcoming_fixtures(owner_lookup, refresh_key)
+    upcoming_fixtures = (
+        pd.concat([upcoming_fixtures, playoff_fixtures], ignore_index=True)
+        .sort_values(["Date", "Time (Denmark)", "City"])
+        .reset_index(drop=True)
+    )
+    return owner_league_table, group_tables, playoff_tables, upcoming_fixtures
+
+
 render_styles()
 
 owners_file_mtime = (DATA_DIR / "owners.csv").stat().st_mtime
-day_key = current_day_key()
 owners = load_owners(owners_file_mtime)
 owner_lookup = dict(zip(owners["team"], owners["player"]))
 chat_owner_options = build_chat_owner_options(owners)
-standings, live_table_loaded = load_standings(day_key)
-owner_league_table = build_owner_league_table(owners, standings)
-group_tables = build_group_tables(standings, owner_lookup)
-group_rankings = build_group_rankings(standings)
-playoff_tables = build_playoff_tables(standings, group_rankings, owner_lookup)
-playoff_fixtures = build_playoff_fixture_table(standings, group_rankings, owner_lookup)
-upcoming_fixtures, live_fixtures_loaded = load_upcoming_fixtures(owner_lookup, day_key)
-upcoming_fixtures = (
-    pd.concat([upcoming_fixtures, playoff_fixtures], ignore_index=True)
-    .sort_values(["Date", "Time (Denmark)", "City"])
-    .reset_index(drop=True)
-)
 chat_messages = load_chat_messages()
 
 st.markdown('<div class="title-wrap"><h1>TIA X World Cup 26</h1></div>', unsafe_allow_html=True)
 
 left_column, right_column = st.columns([1.55, 1])
 
-with left_column:
+@st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
+def render_league_fragment() -> None:
+    owner_league_table, _group_tables, _playoff_tables, _upcoming_fixtures = load_live_dashboard_data(owners, owner_lookup)
     st.markdown('<div class="section-title">League Table</div>', unsafe_allow_html=True)
     render_html_table(owner_league_table, {"W", "D", "L", "GF", "Points"})
+
+
+@st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
+def render_schedule_fragment() -> None:
+    _owner_league_table, group_tables, playoff_tables, upcoming_fixtures = load_live_dashboard_data(owners, owner_lookup)
+
+    st.markdown('<div class="section-title">Upcoming Fixtures</div>', unsafe_allow_html=True)
+    fixture_dates = sorted(upcoming_fixtures["Date"].dropna().unique().tolist())
+
+    if fixture_dates:
+        max_index = len(fixture_dates) - 1
+        if "fixture_date_index" not in st.session_state:
+            st.session_state.fixture_date_index = 0
+        st.session_state.fixture_date_index = max(0, min(st.session_state.fixture_date_index, max_index))
+
+        previous_column, next_column, date_column, _spacer = st.columns([0.42, 0.42, 1.8, 7.36])
+        with previous_column:
+            previous_clicked = st.button(
+                "◀",
+                key="fixture_previous_date",
+                disabled=st.session_state.fixture_date_index == 0,
+                use_container_width=True,
+            )
+        with next_column:
+            next_clicked = st.button(
+                "▶",
+                key="fixture_next_date",
+                disabled=st.session_state.fixture_date_index == max_index,
+                use_container_width=True,
+            )
+
+        if previous_clicked and st.session_state.fixture_date_index > 0:
+            st.session_state.fixture_date_index -= 1
+        if next_clicked and st.session_state.fixture_date_index < max_index:
+            st.session_state.fixture_date_index += 1
+
+        selected_fixture_date = fixture_dates[st.session_state.fixture_date_index]
+        with date_column:
+            st.markdown(
+                f"<div class='fixture-date-label'>{selected_fixture_date}</div>",
+                unsafe_allow_html=True,
+            )
+
+        daily_games = upcoming_fixtures[upcoming_fixtures["Date"] == selected_fixture_date].reset_index(drop=True)
+        render_html_table(daily_games, set())
+    else:
+        st.info("No fixtures available.")
+
+    st.markdown('<div class="section-title">Group Tables</div>', unsafe_allow_html=True)
+    group_names = list(group_tables.keys())
+
+    if group_names:
+        for start_index in range(0, len(group_names), 3):
+            row_columns = st.columns(3)
+            for column, group_name in zip(row_columns, group_names[start_index:start_index + 3]):
+                with column:
+                    st.markdown(f'<div class="group-card"><h3>{group_name}</h3>', unsafe_allow_html=True)
+                    render_html_table(group_tables[group_name], {"P", "W", "D", "L", "GD", "Pts"}, table_class="")
+                    st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.info("No group standings available.")
+
+    st.markdown('<div class="section-title">Playoffs</div>', unsafe_allow_html=True)
+    for round_name, round_table in playoff_tables.items():
+        st.markdown(f"<div style='font-weight:700; color:#0f172a; margin:0.4rem 0 0.55rem 0;'>{round_name}</div>", unsafe_allow_html=True)
+        render_html_table(round_table, {"Match"}, table_class="table-card")
+
+with left_column:
+    render_league_fragment()
 
 with right_column:
     st.markdown('<div class="section-title">Points Rules</div>', unsafe_allow_html=True)
@@ -1019,11 +1109,15 @@ with right_column:
     chat_compose_column, chat_feed_column = st.columns([0.92, 1.28])
 
     with chat_compose_column:
+        if CHAT_OWNER_STATE_KEY not in st.session_state and chat_owner_options:
+            st.session_state[CHAT_OWNER_STATE_KEY] = chat_owner_options[0]
+
         with st.form("team_chat_form", clear_on_submit=True):
             st.markdown('<div class="chat-field-label">Select your name</div>', unsafe_allow_html=True)
             selected_chat_owner = st.selectbox(
                 "Select your name",
                 chat_owner_options,
+                key=CHAT_OWNER_STATE_KEY,
                 label_visibility="collapsed",
             )
             st.markdown('<div class="chat-field-label">Message</div>', unsafe_allow_html=True)
@@ -1040,70 +1134,8 @@ with right_column:
     with chat_feed_column:
         render_chat_feed(chat_messages)
 
-st.markdown('<div class="section-title">Upcoming Fixtures</div>', unsafe_allow_html=True)
-
-fixture_dates = sorted(upcoming_fixtures["Date"].dropna().unique().tolist())
-
-if fixture_dates:
-    max_index = len(fixture_dates) - 1
-    if "fixture_date_index" not in st.session_state:
-        st.session_state.fixture_date_index = 0
-    st.session_state.fixture_date_index = max(0, min(st.session_state.fixture_date_index, max_index))
-
-    previous_column, next_column, date_column, _spacer = st.columns([0.42, 0.42, 1.8, 7.36])
-    with previous_column:
-        previous_clicked = st.button(
-            "◀",
-            key="fixture_previous_date",
-            disabled=st.session_state.fixture_date_index == 0,
-            use_container_width=True,
-        )
-    with next_column:
-        next_clicked = st.button(
-            "▶",
-            key="fixture_next_date",
-            disabled=st.session_state.fixture_date_index == max_index,
-            use_container_width=True,
-        )
-
-    if previous_clicked and st.session_state.fixture_date_index > 0:
-        st.session_state.fixture_date_index -= 1
-    if next_clicked and st.session_state.fixture_date_index < max_index:
-        st.session_state.fixture_date_index += 1
-
-    selected_fixture_date = fixture_dates[st.session_state.fixture_date_index]
-    with date_column:
-        st.markdown(
-            f"<div class='fixture-date-label'>{selected_fixture_date}</div>",
-            unsafe_allow_html=True,
-        )
-
-    daily_games = upcoming_fixtures[upcoming_fixtures["Date"] == selected_fixture_date].reset_index(drop=True)
-    render_html_table(daily_games, set())
-else:
-    st.info("No fixtures available.")
-
-st.markdown('<div class="section-title">Group Tables</div>', unsafe_allow_html=True)
-
-group_names = list(group_tables.keys())
-
-if group_names:
-    for start_index in range(0, len(group_names), 3):
-        row_columns = st.columns(3)
-        for column, group_name in zip(row_columns, group_names[start_index:start_index + 3]):
-            with column:
-                st.markdown(f'<div class="group-card"><h3>{group_name}</h3>', unsafe_allow_html=True)
-                render_html_table(group_tables[group_name], {"P", "W", "D", "L", "GD", "Pts"}, table_class="")
-                st.markdown("</div>", unsafe_allow_html=True)
-else:
-    st.info("No group standings available.")
-
-st.markdown('<div class="section-title">Playoffs</div>', unsafe_allow_html=True)
-
-for round_name, round_table in playoff_tables.items():
-    st.markdown(f"<div style='font-weight:700; color:#0f172a; margin:0.4rem 0 0.55rem 0;'>{round_name}</div>", unsafe_allow_html=True)
-    render_html_table(round_table, {"Match"}, table_class="table-card")
+render_schedule_fragment()
 
 st.caption(
-    "Owner assignments are read directly from owners.csv. Live standings and fixtures attempt to load from TheSportsDB's public World Cup feed and refresh once per day; the app falls back to local sample data when that feed is unavailable."
+    f"Owner assignments are read directly from owners.csv. Live standings and fixtures attempt to load from TheSportsDB's public World Cup feed and auto-refresh every {REFRESH_INTERVAL_SECONDS} seconds; updates still depend on how quickly the source publishes results."
 )
