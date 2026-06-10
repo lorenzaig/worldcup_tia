@@ -655,12 +655,10 @@ def render_chat_feed(messages: list[dict]) -> None:
         message_text = html.escape(entry.get("message", ""))
         display_time = timestamp.replace("T", " ")[:16] if timestamp else ""
         message_html.append(
-            f"""
-            <div class="chat-message">
-                <div class="chat-meta">{html.escape(owner_name)} · {html.escape(display_time)}</div>
-                <div class="chat-body">{message_text}</div>
-            </div>
-            """
+            f'<div class="chat-message">'
+            f'<div class="chat-meta">{html.escape(owner_name)} · {html.escape(display_time)}</div>'
+            f'<div class="chat-body">{message_text}</div>'
+            f'</div>'
         )
 
     st.markdown(f'<div class="chat-feed">{"".join(message_html)}</div>', unsafe_allow_html=True)
