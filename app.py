@@ -1,3 +1,4 @@
+import html
 import json
 import re
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ st.set_page_config(
 LIVE_TABLE_URL = "https://www.thesportsdb.com/api/v1/json/123/lookuptable.php?l=4429&s=2026"
 LIVE_SEASON_GAMES_URL = "https://www.thesportsdb.com/api/v1/json/123/eventsseason.php?id=4429&s=2026"
 DATA_DIR = Path(__file__).resolve().parent
+CHAT_MESSAGES_PATH = DATA_DIR / "chat_messages.jsonl"
 DENMARK_TZ = ZoneInfo("Europe/Copenhagen")
 
 TEAM_ALIASES = {
@@ -358,6 +360,36 @@ def render_styles() -> None:
                 box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.10);
                 vertical-align: middle;
             }
+            .flag-tooltip {
+                position: relative;
+                display: inline-flex;
+                align-items: center;
+                margin-right: 0.2rem;
+            }
+            .flag-tooltip:last-child {
+                margin-right: 0;
+            }
+            .flag-tooltip::after {
+                content: attr(data-tooltip);
+                position: absolute;
+                left: 50%;
+                bottom: calc(100% + 6px);
+                transform: translateX(-50%);
+                background: rgba(15, 23, 42, 0.96);
+                color: #fff;
+                padding: 0.28rem 0.45rem;
+                border-radius: 6px;
+                font-size: 0.74rem;
+                line-height: 1.1;
+                white-space: nowrap;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity 0.12s ease;
+                z-index: 20;
+            }
+            .flag-tooltip:hover::after {
+                opacity: 1;
+            }
             .num-cell {
                 text-align: right;
             }
@@ -384,6 +416,69 @@ def render_styles() -> None:
                 text-align: left;
                 padding-left: 0.25rem;
             }
+            .chat-feed {
+                background: linear-gradient(180deg, rgba(241, 245, 249, 0.96), rgba(226, 232, 240, 0.92));
+                border: 1px solid rgba(148, 163, 184, 0.26);
+                border-radius: 18px;
+                box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+                max-height: 340px;
+                overflow-y: auto;
+                padding: 0.25rem 0;
+            }
+            .chat-message {
+                padding: 0.8rem 0.95rem;
+                border-bottom: 1px solid rgba(226, 232, 240, 0.85);
+                background: rgba(248, 250, 252, 0.68);
+            }
+            .chat-message:last-child {
+                border-bottom: none;
+            }
+            .chat-meta {
+                color: #475569;
+                font-size: 0.76rem;
+                margin-bottom: 0.28rem;
+            }
+            .chat-body {
+                color: #0f172a;
+                font-size: 0.93rem;
+                line-height: 1.45;
+                word-break: break-word;
+            }
+            .chat-empty {
+                color: #64748b;
+                font-size: 0.9rem;
+                padding: 0.95rem 1rem;
+            }
+            .chat-field-label {
+                color: #334155;
+                font-size: 0.8rem;
+                font-weight: 700;
+                margin: 0 0 0.35rem 0.1rem;
+            }
+            div[data-testid="stForm"] {
+                background: linear-gradient(180deg, rgba(241, 245, 249, 0.96), rgba(226, 232, 240, 0.92));
+                border: 1px solid rgba(148, 163, 184, 0.26);
+                border-radius: 18px;
+                box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+                padding: 0.8rem 0.8rem 0.35rem;
+            }
+            div[data-baseweb="select"] span,
+            div[data-baseweb="select"] input,
+            div[data-baseweb="select"] div {
+                color: #000 !important;
+            }
+            div[role="listbox"] div {
+                color: #000 !important;
+            }
+            div[data-testid="stTextArea"] label,
+            div[data-testid="stTextArea"] textarea {
+                color: #000 !important;
+            }
+            div[data-baseweb="select"] > div,
+            div[data-testid="stTextArea"] textarea {
+                background: rgba(248, 250, 252, 0.86) !important;
+                border: 1px solid rgba(148, 163, 184, 0.3) !important;
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -406,8 +501,10 @@ def flag_icon(team_name: str) -> str:
     if not country_code:
         return ""
     return (
+        f'<span class="flag-tooltip" data-tooltip="{canonical_name}">'
         f'<img class="flag-icon" src="https://flagcdn.com/24x18/{country_code}.png" '
-        f'alt="{canonical_name} flag" title="{canonical_name}">'
+        f'alt="{canonical_name} flag">'
+        f"</span>"
     )
 
 
@@ -450,6 +547,10 @@ def render_html_table(dataframe: pd.DataFrame, numeric_columns: set[str], table_
         """,
         unsafe_allow_html=True,
     )
+
+
+def build_chat_owner_options(owners: pd.DataFrame) -> list[str]:
+    return sorted(owners["player"].unique().tolist())
 
 
 @st.cache_data(show_spinner=False)
@@ -495,6 +596,59 @@ def parse_denmark_kickoff(date_value: Optional[str], time_value: Optional[str]) 
 
 def current_day_key() -> str:
     return datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
+
+
+def load_chat_messages() -> list[dict]:
+    if not CHAT_MESSAGES_PATH.exists():
+        return []
+
+    messages = []
+    with CHAT_MESSAGES_PATH.open("r", encoding="utf-8") as chat_file:
+        for line in chat_file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                messages.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    return messages
+
+
+def append_chat_message(owner_name: str, message: str) -> None:
+    CHAT_MESSAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": datetime.now(DENMARK_TZ).isoformat(timespec="seconds"),
+        "owner": owner_name,
+        "message": message.strip(),
+    }
+    with CHAT_MESSAGES_PATH.open("a", encoding="utf-8") as chat_file:
+        chat_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def render_chat_feed(messages: list[dict]) -> None:
+    if not messages:
+        st.markdown('<div class="chat-feed"><div class="chat-empty">No messages yet.</div></div>', unsafe_allow_html=True)
+        return
+
+    recent_messages = messages[-30:]
+    message_html = []
+    for entry in recent_messages:
+        owner_name = entry.get("owner", "Unassigned")
+        timestamp = entry.get("timestamp", "")
+        message_text = html.escape(entry.get("message", ""))
+        display_time = timestamp.replace("T", " ")[:16] if timestamp else ""
+        message_html.append(
+            f"""
+            <div class="chat-message">
+                <div class="chat-meta">{html.escape(owner_name)} · {html.escape(display_time)}</div>
+                <div class="chat-body">{message_text}</div>
+            </div>
+            """
+        )
+
+    st.markdown(f'<div class="chat-feed">{"".join(message_html)}</div>', unsafe_allow_html=True)
 
 
 def fallback_standings() -> pd.DataFrame:
@@ -827,6 +981,7 @@ owners_file_mtime = (DATA_DIR / "owners.csv").stat().st_mtime
 day_key = current_day_key()
 owners = load_owners(owners_file_mtime)
 owner_lookup = dict(zip(owners["team"], owners["player"]))
+chat_owner_options = build_chat_owner_options(owners)
 standings, live_table_loaded = load_standings(day_key)
 owner_league_table = build_owner_league_table(owners, standings)
 group_tables = build_group_tables(standings, owner_lookup)
@@ -839,6 +994,7 @@ upcoming_fixtures = (
     .sort_values(["Date", "Time (Denmark)", "City"])
     .reset_index(drop=True)
 )
+chat_messages = load_chat_messages()
 
 st.markdown('<div class="title-wrap"><h1>TIA X World Cup 26</h1></div>', unsafe_allow_html=True)
 
@@ -859,6 +1015,30 @@ with right_column:
             "Points": st.column_config.TextColumn(width="medium"),
         },
     )
+    st.markdown('<div class="section-title">Team Chat</div>', unsafe_allow_html=True)
+    chat_compose_column, chat_feed_column = st.columns([0.92, 1.28])
+
+    with chat_compose_column:
+        with st.form("team_chat_form", clear_on_submit=True):
+            st.markdown('<div class="chat-field-label">Select your name</div>', unsafe_allow_html=True)
+            selected_chat_owner = st.selectbox(
+                "Select your name",
+                chat_owner_options,
+                label_visibility="collapsed",
+            )
+            st.markdown('<div class="chat-field-label">Message</div>', unsafe_allow_html=True)
+            chat_message = st.text_area("Message", height=130, max_chars=400, label_visibility="collapsed")
+            chat_submitted = st.form_submit_button("Send", use_container_width=True)
+
+        if chat_submitted:
+            if chat_message.strip():
+                append_chat_message(selected_chat_owner, chat_message)
+                st.rerun()
+            else:
+                st.warning("Enter a message before sending.")
+
+    with chat_feed_column:
+        render_chat_feed(chat_messages)
 
 st.markdown('<div class="section-title">Upcoming Fixtures</div>', unsafe_allow_html=True)
 
