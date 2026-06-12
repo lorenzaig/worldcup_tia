@@ -586,7 +586,7 @@ def load_owners(file_mtime: float) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_json(url: str, day_key: str) -> dict:
+def fetch_json(url: str, refresh_key: str) -> dict:
     with urlopen(url, timeout=8) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -665,7 +665,101 @@ def render_chat_feed(messages: list[dict]) -> None:
 
 
 def fallback_standings() -> pd.DataFrame:
-    return pd.DataFrame(FALLBACK_STANDINGS)
+    return build_empty_official_standings()
+
+
+def build_empty_official_standings() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "group": group_name,
+                "team": canonical_team_name(team_name),
+                "played": 0,
+                "won": 0,
+                "drawn": 0,
+                "lost": 0,
+                "gf": 0,
+                "gd": 0,
+                "points": 0,
+            }
+            for group_name, teams in OFFICIAL_GROUPS.items()
+            for team_name in teams
+        ]
+    )
+
+
+def official_group_lookup() -> dict[str, str]:
+    return {
+        canonical_team_name(team_name): group_name
+        for group_name, teams in OFFICIAL_GROUPS.items()
+        for team_name in teams
+    }
+
+
+def parse_score(score_value: object) -> Optional[int]:
+    if score_value in (None, ""):
+        return None
+    try:
+        return int(score_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_standings_from_games_payload(payload: dict) -> tuple[pd.DataFrame, bool]:
+    team_groups = official_group_lookup()
+    rows = {
+        team_name: {
+            "group": group_name,
+            "team": team_name,
+            "played": 0,
+            "won": 0,
+            "drawn": 0,
+            "lost": 0,
+            "gf": 0,
+            "ga": 0,
+            "gd": 0,
+            "points": 0,
+        }
+        for team_name, group_name in team_groups.items()
+    }
+    completed_group_matches = 0
+
+    for event in payload.get("events") or []:
+        home_team = canonical_team_name(event.get("strHomeTeam"))
+        away_team = canonical_team_name(event.get("strAwayTeam"))
+        home_group = team_groups.get(home_team)
+        away_group = team_groups.get(away_team)
+        home_score = parse_score(event.get("intHomeScore"))
+        away_score = parse_score(event.get("intAwayScore"))
+
+        if not home_group or home_group != away_group or home_score is None or away_score is None:
+            continue
+
+        completed_group_matches += 1
+        rows[home_team]["played"] += 1
+        rows[away_team]["played"] += 1
+        rows[home_team]["gf"] += home_score
+        rows[home_team]["ga"] += away_score
+        rows[away_team]["gf"] += away_score
+        rows[away_team]["ga"] += home_score
+
+        if home_score > away_score:
+            rows[home_team]["won"] += 1
+            rows[away_team]["lost"] += 1
+            rows[home_team]["points"] += 3
+        elif home_score < away_score:
+            rows[away_team]["won"] += 1
+            rows[home_team]["lost"] += 1
+            rows[away_team]["points"] += 3
+        else:
+            rows[home_team]["drawn"] += 1
+            rows[away_team]["drawn"] += 1
+            rows[home_team]["points"] += 1
+            rows[away_team]["points"] += 1
+
+    standings = pd.DataFrame(rows.values())
+    standings["gd"] = standings["gf"] - standings["ga"]
+    return standings.drop(columns=["ga"]), completed_group_matches > 0
 
 
 def parse_standings_payload(payload: dict) -> pd.DataFrame:
@@ -690,9 +784,17 @@ def parse_standings_payload(payload: dict) -> pd.DataFrame:
     return pd.DataFrame(parsed_rows)
 
 
-def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
+def load_standings(refresh_key: str) -> tuple[pd.DataFrame, bool]:
     try:
-        payload = fetch_json(LIVE_TABLE_URL, day_key)
+        games_payload = fetch_json(LIVE_SEASON_GAMES_URL, refresh_key)
+        standings, has_completed_group_matches = build_standings_from_games_payload(games_payload)
+        if has_completed_group_matches:
+            return standings, True
+    except (URLError, TimeoutError, OSError, ValueError):
+        pass
+
+    try:
+        payload = fetch_json(LIVE_TABLE_URL, refresh_key)
         standings = parse_standings_payload(payload)
         if not standings.empty:
             return standings, True
@@ -974,9 +1076,9 @@ def fallback_games(owner_lookup: dict[str, str]) -> pd.DataFrame:
     return games[["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]]
 
 
-def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[pd.DataFrame, bool]:
+def load_upcoming_fixtures(owner_lookup: dict[str, str], refresh_key: str) -> tuple[pd.DataFrame, bool]:
     try:
-        payload = fetch_json(LIVE_SEASON_GAMES_URL, day_key)
+        payload = fetch_json(LIVE_SEASON_GAMES_URL, refresh_key)
         fixtures = parse_games_payload(payload, owner_lookup)
         if not fixtures.empty:
             today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
