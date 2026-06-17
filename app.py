@@ -1,11 +1,13 @@
 import html
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -20,11 +22,14 @@ st.set_page_config(
 
 LIVE_TABLE_URL = "https://www.thesportsdb.com/api/v1/json/123/lookuptable.php?l=4429&s=2026"
 LIVE_SEASON_GAMES_URL = "https://www.thesportsdb.com/api/v1/json/123/eventsseason.php?id=4429&s=2026"
+FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_API_TOKEN", "").strip()
 DATA_DIR = Path(__file__).resolve().parent
 CHAT_MESSAGES_PATH = DATA_DIR / "chat_messages.jsonl"
 DENMARK_TZ = ZoneInfo("Europe/Copenhagen")
 CHAT_OWNER_STATE_KEY = "chat_selected_owner"
 REFRESH_INTERVAL_SECONDS = 30
+WIKIPEDIA_API_TEMPLATE = "https://en.wikipedia.org/w/api.php?action=query&prop=revisions&rvprop=content&format=json&titles={title}"
 
 TEAM_ALIASES = {
     "Bosnia-Herzegovina": "Bosnia and Herzegovina",
@@ -154,6 +159,81 @@ OFFICIAL_GROUPS = {
     "Group L": ["England", "Croatia", "Panama", "Ghana"],
 }
 
+WIKIPEDIA_GROUP_PAGE_TITLES = {
+    group_name: f"2026_FIFA_World_Cup_{group_name.replace(' ', '_')}"
+    for group_name in OFFICIAL_GROUPS
+}
+
+TEAM_CODE_TO_NAME = {
+    "ALG": "Algeria",
+    "ARG": "Argentina",
+    "AUS": "Australia",
+    "AUT": "Austria",
+    "BEL": "Belgium",
+    "BIH": "Bosnia and Herzegovina",
+    "BRA": "Brazil",
+    "CAN": "Canada",
+    "COD": "DR Congo",
+    "COL": "Colombia",
+    "CPV": "Cape Verde",
+    "CIV": "Ivory Coast",
+    "CRO": "Croatia",
+    "CUW": "Curacao",
+    "CZE": "Czechia",
+    "ECU": "Ecuador",
+    "EGY": "Egypt",
+    "ENG": "England",
+    "FRA": "France",
+    "GER": "Germany",
+    "GHA": "Ghana",
+    "HTI": "Haiti",
+    "IRQ": "Iraq",
+    "IRN": "Iran",
+    "JOR": "Jordan",
+    "JPN": "Japan",
+    "KOR": "South Korea",
+    "KSA": "Saudi Arabia",
+    "MAR": "Morocco",
+    "MEX": "Mexico",
+    "NED": "Netherlands",
+    "NOR": "Norway",
+    "NZL": "New Zealand",
+    "PAN": "Panama",
+    "PAR": "Paraguay",
+    "POR": "Portugal",
+    "QAT": "Qatar",
+    "RSA": "South Africa",
+    "SCO": "Scotland",
+    "SEN": "Senegal",
+    "ESP": "Spain",
+    "SUI": "Switzerland",
+    "SWE": "Sweden",
+    "TUN": "Tunisia",
+    "TUR": "Turkiye",
+    "URU": "Uruguay",
+    "USA": "United States",
+    "UZB": "Uzbekistan",
+}
+
+VENUE_TIMEZONES = {
+    "Arrowhead Stadium": ZoneInfo("America/Chicago"),
+    "AT&T Stadium": ZoneInfo("America/Chicago"),
+    "BC Place": ZoneInfo("America/Vancouver"),
+    "BMO Field": ZoneInfo("America/Toronto"),
+    "Estadio Akron": ZoneInfo("America/Mexico_City"),
+    "Estadio Azteca": ZoneInfo("America/Mexico_City"),
+    "Estadio BBVA": ZoneInfo("America/Monterrey"),
+    "Gillette Stadium": ZoneInfo("America/New_York"),
+    "Hard Rock Stadium": ZoneInfo("America/New_York"),
+    "Levi's Stadium": ZoneInfo("America/Los_Angeles"),
+    "Lincoln Financial Field": ZoneInfo("America/New_York"),
+    "Lumen Field": ZoneInfo("America/Los_Angeles"),
+    "Mercedes-Benz Stadium": ZoneInfo("America/New_York"),
+    "MetLife Stadium": ZoneInfo("America/New_York"),
+    "NRG Stadium": ZoneInfo("America/Chicago"),
+    "SoFi Stadium": ZoneInfo("America/Los_Angeles"),
+}
+
 PLAYOFF_MATCHES = [
     {"round": "Round of 32", "match": 73, "date": "2026-06-28", "city": "Los Angeles Stadium", "team_1": "2A", "team_2": "2B"},
     {"round": "Round of 32", "match": 74, "date": "2026-06-29", "city": "Boston Stadium", "team_1": "1E", "team_2": "3P1E"},
@@ -242,30 +322,6 @@ THIRD_PLACE_COMBINATION_MAP = {
     "CDEFGIJK": {"1A": "C", "1B": "G", "1D": "E", "1E": "D", "1G": "J", "1I": "F", "1K": "I", "1L": "K"},
 }
 
-FALLBACK_STANDINGS = [
-    {"group": "A", "team": "France", "played": 1, "won": 1, "drawn": 0, "lost": 0, "gf": 2, "gd": 2, "points": 3},
-    {"group": "A", "team": "Spain", "played": 1, "won": 1, "drawn": 0, "lost": 0, "gf": 1, "gd": 1, "points": 3},
-    {"group": "A", "team": "Argentina", "played": 1, "won": 0, "drawn": 0, "lost": 1, "gf": 0, "gd": -1, "points": 0},
-    {"group": "A", "team": "England", "played": 1, "won": 0, "drawn": 0, "lost": 1, "gf": 0, "gd": -2, "points": 0},
-    {"group": "B", "team": "Portugal", "played": 1, "won": 1, "drawn": 0, "lost": 0, "gf": 3, "gd": 2, "points": 3},
-    {"group": "B", "team": "Brazil", "played": 1, "won": 1, "drawn": 0, "lost": 0, "gf": 2, "gd": 1, "points": 3},
-    {"group": "B", "team": "Netherlands", "played": 1, "won": 0, "drawn": 0, "lost": 1, "gf": 1, "gd": -1, "points": 0},
-    {"group": "B", "team": "Germany", "played": 1, "won": 0, "drawn": 0, "lost": 1, "gf": 1, "gd": -2, "points": 0},
-    {"group": "C", "team": "Croatia", "played": 1, "won": 0, "drawn": 1, "lost": 0, "gf": 0, "gd": 0, "points": 1},
-    {"group": "C", "team": "Belgium", "played": 1, "won": 0, "drawn": 1, "lost": 0, "gf": 0, "gd": 0, "points": 1},
-    {"group": "C", "team": "Morocco", "played": 1, "won": 0, "drawn": 1, "lost": 0, "gf": 0, "gd": 0, "points": 1},
-    {"group": "C", "team": "United States", "played": 1, "won": 0, "drawn": 1, "lost": 0, "gf": 0, "gd": 0, "points": 1},
-]
-
-FALLBACK_FIXTURES = [
-    {"date": "2026-06-14", "time": "19:00", "home_team": "France", "away_team": "Spain", "city": "Mexico City", "score": "-"},
-    {"date": "2026-06-14", "time": "22:00", "home_team": "Argentina", "away_team": "England", "city": "Los Angeles", "score": "-"},
-    {"date": "2026-06-15", "time": "19:00", "home_team": "Portugal", "away_team": "Brazil", "city": "Dallas", "score": "-"},
-    {"date": "2026-06-15", "time": "22:00", "home_team": "Netherlands", "away_team": "Germany", "city": "New York", "score": "-"},
-    {"date": "2026-06-16", "time": "19:00", "home_team": "Croatia", "away_team": "Belgium", "city": "Toronto", "score": "-"},
-    {"date": "2026-06-16", "time": "22:00", "home_team": "Morocco", "away_team": "United States", "city": "Seattle", "score": "-"},
-]
-
 POINTS_RULES = [
     {"Rule": "Match win", "Points": "3"},
     {"Rule": "Match draw", "Points": "1"},
@@ -288,6 +344,8 @@ def render_styles() -> None:
             .block-container {
                 padding-top: 1.75rem;
                 padding-bottom: 2rem;
+                padding-left: 1.1rem;
+                padding-right: 1.1rem;
             }
             .section-title {
                 font-size: 1.35rem;
@@ -324,6 +382,12 @@ def render_styles() -> None:
                 color: #0f172a;
                 border-bottom: 1px solid rgba(148, 163, 184, 0.22);
                 background: linear-gradient(180deg, rgba(239, 246, 255, 0.95), rgba(255, 255, 255, 0.95));
+            }
+            .table-scroll {
+                width: 100%;
+                overflow-x: auto;
+                overflow-y: hidden;
+                -webkit-overflow-scrolling: touch;
             }
             table.custom-table {
                 width: 100%;
@@ -493,6 +557,80 @@ def render_styles() -> None:
                 background: rgba(248, 250, 252, 0.86) !important;
                 border: 1px solid rgba(148, 163, 184, 0.3) !important;
             }
+            div[data-testid="stDataFrame"] {
+                overflow-x: auto;
+            }
+            @media (max-width: 900px) {
+                .block-container {
+                    padding-top: 1rem;
+                    padding-bottom: 1.35rem;
+                    padding-left: 0.8rem;
+                    padding-right: 0.8rem;
+                }
+                .title-wrap h1 {
+                    font-size: 1.9rem;
+                    line-height: 1.08;
+                    margin-bottom: 0.8rem;
+                }
+                .section-title {
+                    font-size: 1.15rem;
+                    margin-bottom: 0.55rem;
+                }
+                div[data-testid="stHorizontalBlock"] {
+                    flex-wrap: wrap;
+                    gap: 0.85rem !important;
+                }
+                div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                    min-width: 100% !important;
+                    flex: 1 1 100% !important;
+                }
+                .table-card,
+                .group-card,
+                .chat-feed,
+                div[data-testid="stForm"] {
+                    border-radius: 16px;
+                }
+                table.custom-table {
+                    min-width: 680px;
+                    font-size: 0.86rem;
+                }
+                table.custom-table th,
+                table.custom-table td {
+                    padding: 0.64rem 0.68rem;
+                }
+                .group-card h3 {
+                    padding: 0.75rem 0.85rem 0.65rem;
+                }
+                .fixture-date-label {
+                    padding-left: 0;
+                    line-height: 1.35;
+                }
+                .chat-feed {
+                    max-height: 280px;
+                }
+                div[data-testid="stButton"] > button {
+                    min-height: 2.15rem;
+                }
+            }
+            @media (max-width: 560px) {
+                .title-wrap h1 {
+                    font-size: 1.65rem;
+                }
+                .section-title {
+                    font-size: 1.05rem;
+                }
+                table.custom-table {
+                    min-width: 620px;
+                    font-size: 0.82rem;
+                }
+                table.custom-table th,
+                table.custom-table td {
+                    padding: 0.58rem 0.6rem;
+                }
+                .chat-feed {
+                    max-height: 240px;
+                }
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -530,7 +668,7 @@ def format_team_with_flag(team_name: str) -> str:
 
 def render_html_table(dataframe: pd.DataFrame, numeric_columns: set[str], table_class: str = "table-card") -> None:
     headers = "".join(
-        f'<th{" class=\"num-cell\"" if column in numeric_columns else ""}>{column}</th>'
+        (f'<th class="num-cell">{column}</th>' if column in numeric_columns else f"<th>{column}</th>")
         for column in dataframe.columns
     )
     body_rows = []
@@ -553,10 +691,12 @@ def render_html_table(dataframe: pd.DataFrame, numeric_columns: set[str], table_
     st.markdown(
         f"""
         {wrapper_open}
-            <table class="custom-table">
-                <thead><tr>{headers}</tr></thead>
-                <tbody>{''.join(body_rows)}</tbody>
-            </table>
+            <div class="table-scroll">
+                <table class="custom-table">
+                    <thead><tr>{headers}</tr></thead>
+                    <tbody>{''.join(body_rows)}</tbody>
+                </table>
+            </div>
         {wrapper_close}
         """,
         unsafe_allow_html=True,
@@ -586,8 +726,14 @@ def load_owners(file_mtime: float) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def fetch_json(url: str, refresh_key: str) -> dict:
-    with urlopen(url, timeout=8) as response:
+def fetch_json(url: str, day_key: str, auth_token: str = "", unfold_goals: bool = False) -> dict:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if auth_token:
+        headers["X-Auth-Token"] = auth_token
+    if unfold_goals:
+        headers["X-Unfold-Goals"] = "true"
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=8) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -611,6 +757,75 @@ def parse_denmark_kickoff(date_value: Optional[str], time_value: Optional[str]) 
 def current_refresh_key(interval_seconds: int) -> str:
     now = datetime.now(DENMARK_TZ)
     return f"{now.strftime('%Y-%m-%d')}-{int(now.timestamp() // interval_seconds)}"
+
+
+def wikipedia_api_url(page_title: str) -> str:
+    return WIKIPEDIA_API_TEMPLATE.format(title=quote(page_title))
+
+
+def strip_wiki_markup(value: str) -> str:
+    cleaned = value.replace("&nbsp;", " ")
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    cleaned = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", cleaned)
+    cleaned = re.sub(r"\[\[([^\]]+)\]\]", r"\1", cleaned)
+    return re.sub(r"\s+", " ", html.unescape(cleaned)).strip(" ,")
+
+
+def extract_wiki_field(block: str, field_name: str) -> str:
+    match = re.search(
+        rf"\|{re.escape(field_name)}=(.*?)(?=\n\|[A-Za-z0-9_]+=|\Z)",
+        block,
+        flags=re.S,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def parse_wikipedia_score(score_value: str, goals_1: str, goals_2: str) -> tuple[Optional[int], Optional[int]]:
+    if not score_value or "Match " in score_value:
+        return None, None
+
+    score_token = re.sub(r"[{}]", "", score_value.rsplit("|", 1)[-1]).strip()
+    explicit_score = re.search(r"(\d+)[^\d]+(\d+)", score_token)
+    if explicit_score:
+        return int(explicit_score.group(1)), int(explicit_score.group(2))
+
+    compact_token = re.sub(r"\s+", "", score_token)
+    if compact_token.isdigit():
+        if len(compact_token) == 2:
+            return int(compact_token[0]), int(compact_token[1])
+        if len(compact_token) >= 3:
+            return int(compact_token[:-1]), int(compact_token[-1])
+
+    goals_1_total = len(re.findall(r"\{\{goal\|", goals_1 or ""))
+    goals_2_total = len(re.findall(r"\{\{goal\|", goals_2 or ""))
+    if goals_1_total or goals_2_total:
+        return goals_1_total, goals_2_total
+
+    return None, None
+
+
+def parse_wikipedia_time_to_denmark(date_value: str, time_value: str, venue_value: str) -> tuple[str, str]:
+    cleaned_time = strip_wiki_markup(time_value).replace("a.m.", "AM").replace("p.m.", "PM")
+    cleaned_time = cleaned_time.replace("a.m", "AM").replace("p.m", "PM").upper()
+    cleaned_time = re.sub(r"\s+UTC.*$", "", cleaned_time).strip()
+
+    venue_timezone = None
+    for venue_name, timezone_name in VENUE_TIMEZONES.items():
+        if venue_name in venue_value:
+            venue_timezone = timezone_name
+            break
+
+    if not cleaned_time or venue_timezone is None:
+        return date_value, "-"
+
+    try:
+        local_kickoff = datetime.strptime(f"{date_value} {cleaned_time}", "%Y-%m-%d %I:%M %p").replace(
+            tzinfo=venue_timezone
+        )
+        denmark_kickoff = local_kickoff.astimezone(DENMARK_TZ)
+        return denmark_kickoff.strftime("%Y-%m-%d"), denmark_kickoff.strftime("%H:%M")
+    except ValueError:
+        return date_value, "-"
 
 
 def load_chat_messages() -> list[dict]:
@@ -665,101 +880,167 @@ def render_chat_feed(messages: list[dict]) -> None:
 
 
 def fallback_standings() -> pd.DataFrame:
-    return build_empty_official_standings()
+    rows = []
+    for group_name, teams in OFFICIAL_GROUPS.items():
+        group_letter = group_name.split()[-1]
+        for team_name in teams:
+            rows.append(
+                {
+                    "group": group_letter,
+                    "team": team_name,
+                    "played": 0,
+                    "won": 0,
+                    "drawn": 0,
+                    "lost": 0,
+                    "gf": 0,
+                    "gd": 0,
+                    "points": 0,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
-def build_empty_official_standings() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "group": group_name,
-                "team": canonical_team_name(team_name),
-                "played": 0,
-                "won": 0,
-                "drawn": 0,
-                "lost": 0,
-                "gf": 0,
-                "gd": 0,
-                "points": 0,
-            }
-            for group_name, teams in OFFICIAL_GROUPS.items()
-            for team_name in teams
-        ]
+def parse_wikipedia_group_page(wikitext: str, group_name: str) -> list[dict]:
+    match_pattern = re.compile(
+        r"<section begin=(?P<section>[A-Z]\d+)\s*/>\{\{#invoke:football box\|main(?P<body>.*?)\}\}<section end=(?P=section)\s*/>",
+        flags=re.S,
     )
+    parsed_matches = []
 
+    for match in match_pattern.finditer(wikitext):
+        block = match.group("body")
+        team_1_code = re.search(r"\|([A-Z]{3})\}\}$", extract_wiki_field(block, "team1"))
+        team_2_code = re.search(r"\|([A-Z]{3})\}\}$", extract_wiki_field(block, "team2"))
 
-def official_group_lookup() -> dict[str, str]:
-    return {
-        canonical_team_name(team_name): group_name
-        for group_name, teams in OFFICIAL_GROUPS.items()
-        for team_name in teams
-    }
-
-
-def parse_score(score_value: object) -> Optional[int]:
-    if score_value in (None, ""):
-        return None
-    try:
-        return int(score_value)
-    except (TypeError, ValueError):
-        return None
-
-
-def build_standings_from_games_payload(payload: dict) -> tuple[pd.DataFrame, bool]:
-    team_groups = official_group_lookup()
-    rows = {
-        team_name: {
-            "group": group_name,
-            "team": team_name,
-            "played": 0,
-            "won": 0,
-            "drawn": 0,
-            "lost": 0,
-            "gf": 0,
-            "ga": 0,
-            "gd": 0,
-            "points": 0,
-        }
-        for team_name, group_name in team_groups.items()
-    }
-    completed_group_matches = 0
-
-    for event in payload.get("events") or []:
-        home_team = canonical_team_name(event.get("strHomeTeam"))
-        away_team = canonical_team_name(event.get("strAwayTeam"))
-        home_group = team_groups.get(home_team)
-        away_group = team_groups.get(away_team)
-        home_score = parse_score(event.get("intHomeScore"))
-        away_score = parse_score(event.get("intAwayScore"))
-
-        if not home_group or home_group != away_group or home_score is None or away_score is None:
+        if not team_1_code or not team_2_code:
             continue
 
-        completed_group_matches += 1
-        rows[home_team]["played"] += 1
-        rows[away_team]["played"] += 1
-        rows[home_team]["gf"] += home_score
-        rows[home_team]["ga"] += away_score
-        rows[away_team]["gf"] += away_score
-        rows[away_team]["ga"] += home_score
+        team_1 = TEAM_CODE_TO_NAME.get(team_1_code.group(1))
+        team_2 = TEAM_CODE_TO_NAME.get(team_2_code.group(1))
+        if not team_1 or not team_2:
+            continue
 
-        if home_score > away_score:
-            rows[home_team]["won"] += 1
-            rows[away_team]["lost"] += 1
-            rows[home_team]["points"] += 3
-        elif home_score < away_score:
-            rows[away_team]["won"] += 1
-            rows[home_team]["lost"] += 1
-            rows[away_team]["points"] += 3
-        else:
-            rows[home_team]["drawn"] += 1
-            rows[away_team]["drawn"] += 1
-            rows[home_team]["points"] += 1
-            rows[away_team]["points"] += 1
+        date_match = re.search(r"\{\{Start date\|(\d{4})\|(\d{1,2})\|(\d{1,2})\}\}", extract_wiki_field(block, "date"))
+        if not date_match:
+            continue
 
-    standings = pd.DataFrame(rows.values())
-    standings["gd"] = standings["gf"] - standings["ga"]
-    return standings.drop(columns=["ga"]), completed_group_matches > 0
+        date_value = f"{date_match.group(1)}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
+        time_value = extract_wiki_field(block, "time")
+        venue_value = strip_wiki_markup(extract_wiki_field(block, "stadium"))
+        score_value = extract_wiki_field(block, "score")
+        goals_1 = extract_wiki_field(block, "goals1")
+        goals_2 = extract_wiki_field(block, "goals2")
+        home_score, away_score = parse_wikipedia_score(score_value, goals_1, goals_2)
+        denmark_date, denmark_time = parse_wikipedia_time_to_denmark(date_value, time_value, venue_value)
+
+        parsed_matches.append(
+            {
+                "group": group_name.split()[-1],
+                "date": denmark_date,
+                "time": denmark_time,
+                "home_team": canonical_team_name(team_1),
+                "away_team": canonical_team_name(team_2),
+                "city": venue_value or "-",
+                "home_score": home_score,
+                "away_score": away_score,
+            }
+        )
+
+    return parsed_matches
+
+
+@st.cache_data(show_spinner=False)
+def load_wikipedia_group_stage_data(day_key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    matches = []
+    for group_name, page_title in WIKIPEDIA_GROUP_PAGE_TITLES.items():
+        payload = fetch_json(wikipedia_api_url(page_title), day_key)
+        pages = payload.get("query", {}).get("pages", {})
+        page = next(iter(pages.values()), {})
+        revisions = page.get("revisions") or []
+        if not revisions:
+            continue
+
+        wikitext = revisions[0].get("*", "")
+        if not wikitext:
+            continue
+
+        matches.extend(parse_wikipedia_group_page(wikitext, group_name))
+
+    matches_dataframe = pd.DataFrame(matches)
+    if matches_dataframe.empty:
+        return fallback_standings(), pd.DataFrame()
+
+    standings_rows = []
+    for group_name, teams in OFFICIAL_GROUPS.items():
+        group_letter = group_name.split()[-1]
+        group_matches = matches_dataframe[
+            (matches_dataframe["group"] == group_letter)
+            & matches_dataframe["home_score"].notna()
+            & matches_dataframe["away_score"].notna()
+        ]
+
+        for team_name in teams:
+            team_matches = group_matches[
+                (group_matches["home_team"] == team_name) | (group_matches["away_team"] == team_name)
+            ]
+            played = len(team_matches)
+            won = drawn = lost = gf = ga = 0
+
+            for _, match_row in team_matches.iterrows():
+                is_home_team = match_row["home_team"] == team_name
+                team_goals = int(match_row["home_score"] if is_home_team else match_row["away_score"])
+                opponent_goals = int(match_row["away_score"] if is_home_team else match_row["home_score"])
+                gf += team_goals
+                ga += opponent_goals
+                if team_goals > opponent_goals:
+                    won += 1
+                elif team_goals == opponent_goals:
+                    drawn += 1
+                else:
+                    lost += 1
+
+            standings_rows.append(
+                {
+                    "group": group_letter,
+                    "team": team_name,
+                    "played": played,
+                    "won": won,
+                    "drawn": drawn,
+                    "lost": lost,
+                    "gf": gf,
+                    "gd": gf - ga,
+                    "points": won * 3 + drawn,
+                }
+            )
+
+    return pd.DataFrame(standings_rows), matches_dataframe
+
+
+def build_fixture_table_from_matches(matches: pd.DataFrame, owner_lookup: dict[str, str]) -> pd.DataFrame:
+    if matches.empty:
+        return pd.DataFrame(columns=["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"])
+
+    fixtures = matches.copy()
+    fixtures["Team 1 (Owner)"] = fixtures["home_team"].apply(
+        lambda team: f"{format_team_with_flag(team)} ({owner_lookup.get(team, 'Unassigned')})"
+    )
+    fixtures["Team 2 (Owner)"] = fixtures["away_team"].apply(
+        lambda team: f"{format_team_with_flag(team)} ({owner_lookup.get(team, 'Unassigned')})"
+    )
+    fixtures["Score"] = fixtures.apply(
+        lambda row: "-"
+        if pd.isna(row["home_score"]) or pd.isna(row["away_score"])
+        else f"{int(row['home_score'])}-{int(row['away_score'])}",
+        axis=1,
+    )
+    fixtures = fixtures.rename(
+        columns={
+            "date": "Date",
+            "time": "Time (Denmark)",
+            "city": "City",
+        }
+    )
+    return fixtures[["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]]
 
 
 def parse_standings_payload(payload: dict) -> pd.DataFrame:
@@ -784,17 +1065,112 @@ def parse_standings_payload(payload: dict) -> pd.DataFrame:
     return pd.DataFrame(parsed_rows)
 
 
-def load_standings(refresh_key: str) -> tuple[pd.DataFrame, bool]:
+def parse_football_data_standings_payload(payload: dict) -> pd.DataFrame:
+    standings_rows = []
+
+    for standings_block in payload.get("standings") or []:
+        group_name = standings_block.get("group") or "GROUP_STAGE"
+        group_letter = group_name.replace("GROUP_", "")
+        for row in standings_block.get("table") or []:
+            team_data = row.get("team") or {}
+            standings_rows.append(
+                {
+                    "group": group_letter,
+                    "team": canonical_team_name(team_data.get("name") or "-"),
+                    "played": int(row.get("playedGames") or 0),
+                    "won": int(row.get("won") or 0),
+                    "drawn": int(row.get("draw") or 0),
+                    "lost": int(row.get("lost") or 0),
+                    "gf": int(row.get("goalsFor") or 0),
+                    "gd": int(row.get("goalDifference") or 0),
+                    "points": int(row.get("points") or 0),
+                }
+            )
+
+    return pd.DataFrame(standings_rows)
+
+
+def parse_football_data_matches_payload(payload: dict, owner_lookup: dict[str, str]) -> pd.DataFrame:
+    fixture_rows = []
+
+    for row in payload.get("matches") or []:
+        home_team = canonical_team_name((row.get("homeTeam") or {}).get("name") or "-")
+        away_team = canonical_team_name((row.get("awayTeam") or {}).get("name") or "-")
+
+        utc_date = row.get("utcDate") or ""
+        date_value = utc_date[:10] if len(utc_date) >= 10 else "-"
+        time_value = utc_date[11:19] if len(utc_date) >= 19 else None
+        denmark_date, denmark_time = parse_denmark_kickoff(date_value, time_value)
+
+        score = row.get("score") or {}
+        regular_time = score.get("regularTime") or {}
+        home_score = regular_time.get("home")
+        away_score = regular_time.get("away")
+
+        fixture_rows.append(
+            {
+                "Date": denmark_date,
+                "Time (Denmark)": denmark_time,
+                "Team 1 (Owner)": f"{format_team_with_flag(home_team)} ({owner_lookup.get(home_team, 'Unassigned')})",
+                "Team 2 (Owner)": f"{format_team_with_flag(away_team)} ({owner_lookup.get(away_team, 'Unassigned')})",
+                "City": row.get("venue") or "-",
+                "Score": "-" if home_score is None or away_score is None else f"{home_score}-{away_score}",
+            }
+        )
+
+    return pd.DataFrame(fixture_rows)
+
+
+def load_football_data_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
+    if not FOOTBALL_DATA_TOKEN:
+        return pd.DataFrame(), False
+
     try:
-        games_payload = fetch_json(LIVE_SEASON_GAMES_URL, refresh_key)
-        standings, has_completed_group_matches = build_standings_from_games_payload(games_payload)
-        if has_completed_group_matches:
+        payload = fetch_json(
+            f"{FOOTBALL_DATA_BASE_URL}/competitions/WC/standings?season=2026",
+            day_key,
+            auth_token=FOOTBALL_DATA_TOKEN,
+        )
+        standings = parse_football_data_standings_payload(payload)
+        if not standings.empty:
             return standings, True
     except (URLError, TimeoutError, OSError, ValueError):
         pass
 
+    return pd.DataFrame(), False
+
+
+def load_football_data_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[pd.DataFrame, bool]:
+    if not FOOTBALL_DATA_TOKEN:
+        return pd.DataFrame(), False
+
     try:
-        payload = fetch_json(LIVE_TABLE_URL, refresh_key)
+        payload = fetch_json(
+            f"{FOOTBALL_DATA_BASE_URL}/competitions/WC/matches?season=2026",
+            day_key,
+            auth_token=FOOTBALL_DATA_TOKEN,
+            unfold_goals=True,
+        )
+        fixtures = parse_football_data_matches_payload(payload, owner_lookup)
+        if not fixtures.empty:
+            return fixtures, True
+    except (URLError, TimeoutError, OSError, ValueError):
+        pass
+
+    return pd.DataFrame(), False
+
+
+def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
+    football_data_standings, football_data_loaded = load_football_data_standings(day_key)
+    if football_data_loaded:
+        return football_data_standings, True
+
+    wiki_standings, wiki_matches = load_wikipedia_group_stage_data(day_key)
+    if not wiki_matches.empty:
+        return wiki_standings, True
+
+    try:
+        payload = fetch_json(LIVE_TABLE_URL, day_key)
         standings = parse_standings_payload(payload)
         if not standings.empty:
             return standings, True
@@ -1058,27 +1434,28 @@ def parse_games_payload(payload: dict, owner_lookup: dict[str, str]) -> pd.DataF
 
 
 def fallback_games(owner_lookup: dict[str, str]) -> pd.DataFrame:
-    games = pd.DataFrame(FALLBACK_FIXTURES)
-    games["Team 1 (Owner)"] = games["home_team"].apply(
-        lambda team: f"{format_team_with_flag(team)} ({owner_lookup.get(team, 'Unassigned')})"
-    )
-    games["Team 2 (Owner)"] = games["away_team"].apply(
-        lambda team: f"{format_team_with_flag(team)} ({owner_lookup.get(team, 'Unassigned')})"
-    )
-    games = games.rename(
-        columns={
-            "date": "Date",
-            "time": "Time (Denmark)",
-            "city": "City",
-            "score": "Score",
-        }
-    )
-    return games[["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]]
+    del owner_lookup
+    return pd.DataFrame(columns=["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"])
 
 
-def load_upcoming_fixtures(owner_lookup: dict[str, str], refresh_key: str) -> tuple[pd.DataFrame, bool]:
+def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[pd.DataFrame, bool]:
+    football_data_fixtures, football_data_loaded = load_football_data_fixtures(owner_lookup, day_key)
+    if football_data_loaded:
+        today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
+        upcoming_football_data = football_data_fixtures[football_data_fixtures["Date"] >= today_denmark].copy()
+        if not upcoming_football_data.empty:
+            return upcoming_football_data.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
+
+    _wiki_standings, wiki_matches = load_wikipedia_group_stage_data(day_key)
+    if not wiki_matches.empty:
+        wikipedia_fixtures = build_fixture_table_from_matches(wiki_matches, owner_lookup)
+        today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
+        upcoming_wikipedia = wikipedia_fixtures[wikipedia_fixtures["Date"] >= today_denmark].copy()
+        if not upcoming_wikipedia.empty:
+            return upcoming_wikipedia.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
+
     try:
-        payload = fetch_json(LIVE_SEASON_GAMES_URL, refresh_key)
+        payload = fetch_json(LIVE_SEASON_GAMES_URL, day_key)
         fixtures = parse_games_payload(payload, owner_lookup)
         if not fixtures.empty:
             today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
@@ -1237,5 +1614,5 @@ with right_column:
 render_schedule_fragment()
 
 st.caption(
-    f"Owner assignments are read directly from owners.csv. Live standings and fixtures attempt to load from TheSportsDB's public World Cup feed and auto-refresh every {REFRESH_INTERVAL_SECONDS} seconds; updates still depend on how quickly the source publishes results."
+    f"Owner assignments are read directly from owners.csv. If `FOOTBALL_DATA_API_TOKEN` is set, the app uses football-data.org's `WC` competition endpoints first; otherwise it falls back to Wikipedia group pages and then TheSportsDB. Data refreshes every {REFRESH_INTERVAL_SECONDS} seconds. Playoff rows remain template placeholders until knockout pairings are known."
 )
