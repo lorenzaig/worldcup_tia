@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -733,8 +733,11 @@ def fetch_json(url: str, day_key: str, auth_token: str = "", unfold_goals: bool 
     if unfold_goals:
         headers["X-Unfold-Goals"] = "true"
     request = Request(url, headers=headers)
-    with urlopen(request, timeout=8) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=8) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return {}
 
 
 def parse_denmark_kickoff(date_value: Optional[str], time_value: Optional[str]) -> tuple[str, str]:
@@ -880,24 +883,7 @@ def render_chat_feed(messages: list[dict]) -> None:
 
 
 def fallback_standings() -> pd.DataFrame:
-    rows = []
-    for group_name, teams in OFFICIAL_GROUPS.items():
-        group_letter = group_name.split()[-1]
-        for team_name in teams:
-            rows.append(
-                {
-                    "group": group_letter,
-                    "team": team_name,
-                    "played": 0,
-                    "won": 0,
-                    "drawn": 0,
-                    "lost": 0,
-                    "gf": 0,
-                    "gd": 0,
-                    "points": 0,
-                }
-            )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(FALLBACK_STANDINGS)
 
 
 def parse_wikipedia_group_page(wikitext: str, group_name: str) -> list[dict]:
@@ -1043,6 +1029,16 @@ def build_fixture_table_from_matches(matches: pd.DataFrame, owner_lookup: dict[s
     return fixtures[["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]]
 
 
+def has_recorded_results(standings: pd.DataFrame) -> bool:
+    if standings.empty:
+        return False
+    result_columns = ["played", "won", "drawn", "lost", "gf", "points"]
+    available_columns = [column for column in result_columns if column in standings.columns]
+    if not available_columns:
+        return False
+    return standings[available_columns].fillna(0).astype(int).to_numpy().sum() > 0
+
+
 def parse_standings_payload(payload: dict) -> pd.DataFrame:
     rows = payload.get("table") or []
     parsed_rows = []
@@ -1172,7 +1168,7 @@ def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
     try:
         payload = fetch_json(LIVE_TABLE_URL, day_key)
         standings = parse_standings_payload(payload)
-        if not standings.empty:
+        if has_recorded_results(standings):
             return standings, True
     except (URLError, TimeoutError, OSError, ValueError):
         pass
