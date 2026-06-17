@@ -330,6 +330,10 @@ POINTS_RULES = [
     {"Rule": "Owner total", "Points": "Match points + goals scored across all owned teams"},
 ]
 
+STANDINGS_COLUMNS = ["group", "team", "played", "won", "drawn", "lost", "gf", "gd", "points"]
+OWNER_LEAGUE_COLUMNS = ["Owner", "Teams", "W", "D", "L", "GF", "Points"]
+FIXTURE_COLUMNS = ["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]
+
 
 def render_styles() -> None:
     st.markdown(
@@ -882,8 +886,8 @@ def render_chat_feed(messages: list[dict]) -> None:
     st.markdown(f'<div class="chat-feed">{"".join(message_html)}</div>', unsafe_allow_html=True)
 
 
-def fallback_standings() -> pd.DataFrame:
-    return pd.DataFrame(FALLBACK_STANDINGS)
+def empty_standings() -> pd.DataFrame:
+    return pd.DataFrame(columns=STANDINGS_COLUMNS)
 
 
 def parse_wikipedia_group_page(wikitext: str, group_name: str) -> list[dict]:
@@ -939,7 +943,11 @@ def parse_wikipedia_group_page(wikitext: str, group_name: str) -> list[dict]:
 def load_wikipedia_group_stage_data(day_key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     matches = []
     for group_name, page_title in WIKIPEDIA_GROUP_PAGE_TITLES.items():
-        payload = fetch_json(wikipedia_api_url(page_title), day_key)
+        try:
+            payload = fetch_json(wikipedia_api_url(page_title), day_key)
+        except (URLError, TimeoutError, OSError, ValueError):
+            continue
+
         pages = payload.get("query", {}).get("pages", {})
         page = next(iter(pages.values()), {})
         revisions = page.get("revisions") or []
@@ -954,7 +962,7 @@ def load_wikipedia_group_stage_data(day_key: str) -> tuple[pd.DataFrame, pd.Data
 
     matches_dataframe = pd.DataFrame(matches)
     if matches_dataframe.empty:
-        return fallback_standings(), pd.DataFrame()
+        return empty_standings(), pd.DataFrame()
 
     standings_rows = []
     for group_name, teams in OFFICIAL_GROUPS.items():
@@ -1172,7 +1180,7 @@ def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
             return standings, True
     except (URLError, TimeoutError, OSError, ValueError):
         pass
-    return fallback_standings(), False
+    return empty_standings(), False
 
 
 def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> pd.DataFrame:
@@ -1429,55 +1437,58 @@ def parse_games_payload(payload: dict, owner_lookup: dict[str, str]) -> pd.DataF
     return pd.DataFrame(parsed_rows)
 
 
-def fallback_games(owner_lookup: dict[str, str]) -> pd.DataFrame:
-    del owner_lookup
-    return pd.DataFrame(columns=["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"])
+def empty_fixtures() -> pd.DataFrame:
+    return pd.DataFrame(columns=FIXTURE_COLUMNS)
 
 
 def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[pd.DataFrame, bool]:
     football_data_fixtures, football_data_loaded = load_football_data_fixtures(owner_lookup, day_key)
-    if football_data_loaded:
-        today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
-        upcoming_football_data = football_data_fixtures[football_data_fixtures["Date"] >= today_denmark].copy()
-        if not upcoming_football_data.empty:
-            return upcoming_football_data.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
+    if football_data_loaded and not football_data_fixtures.empty:
+        return football_data_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
 
     _wiki_standings, wiki_matches = load_wikipedia_group_stage_data(day_key)
     if not wiki_matches.empty:
         wikipedia_fixtures = build_fixture_table_from_matches(wiki_matches, owner_lookup)
-        today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
-        upcoming_wikipedia = wikipedia_fixtures[wikipedia_fixtures["Date"] >= today_denmark].copy()
-        if not upcoming_wikipedia.empty:
-            return upcoming_wikipedia.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
+        if not wikipedia_fixtures.empty:
+            return wikipedia_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
 
     try:
         payload = fetch_json(LIVE_SEASON_GAMES_URL, day_key)
         fixtures = parse_games_payload(payload, owner_lookup)
         if not fixtures.empty:
-            today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
-            upcoming_only = fixtures[fixtures["Date"] >= today_denmark].copy()
-            if not upcoming_only.empty:
-                return upcoming_only.sort_values(["Date", "Time (Denmark)"]).reset_index(drop=True), True
+            return fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
     except (URLError, TimeoutError, OSError, ValueError):
         pass
-    return fallback_games(owner_lookup), False
+    return empty_fixtures(), False
 
 
-def load_live_dashboard_data(owners: pd.DataFrame, owner_lookup: dict[str, str]) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame], pd.DataFrame]:
+def load_live_dashboard_data(
+    owners: pd.DataFrame,
+    owner_lookup: dict[str, str],
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame], pd.DataFrame, bool, bool]:
     refresh_key = current_refresh_key(REFRESH_INTERVAL_SECONDS)
-    standings, _live_table_loaded = load_standings(refresh_key)
-    owner_league_table = build_owner_league_table(owners, standings)
-    group_tables = build_group_tables(standings, owner_lookup)
-    group_rankings = build_group_rankings(standings)
-    playoff_tables = build_playoff_tables(standings, group_rankings, owner_lookup)
-    playoff_fixtures = build_playoff_fixture_table(standings, group_rankings, owner_lookup)
-    upcoming_fixtures, _live_games_loaded = load_upcoming_fixtures(owner_lookup, refresh_key)
-    upcoming_fixtures = (
-        pd.concat([upcoming_fixtures, playoff_fixtures], ignore_index=True)
-        .sort_values(["Date", "Time (Denmark)", "City"])
-        .reset_index(drop=True)
-    )
-    return owner_league_table, group_tables, playoff_tables, upcoming_fixtures
+    standings, standings_loaded = load_standings(refresh_key)
+
+    if standings_loaded:
+        owner_league_table = build_owner_league_table(owners, standings)
+        group_tables = build_group_tables(standings, owner_lookup)
+        group_rankings = build_group_rankings(standings)
+        playoff_tables = build_playoff_tables(standings, group_rankings, owner_lookup)
+        playoff_fixtures = build_playoff_fixture_table(standings, group_rankings, owner_lookup)
+    else:
+        owner_league_table = pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
+        group_tables = {}
+        playoff_tables = {}
+        playoff_fixtures = empty_fixtures()
+
+    upcoming_fixtures, fixtures_loaded = load_upcoming_fixtures(owner_lookup, refresh_key)
+    if fixtures_loaded and standings_loaded and not playoff_fixtures.empty:
+        upcoming_fixtures = pd.concat([upcoming_fixtures, playoff_fixtures], ignore_index=True)
+
+    if not upcoming_fixtures.empty:
+        upcoming_fixtures = upcoming_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True)
+
+    return owner_league_table, group_tables, playoff_tables, upcoming_fixtures, standings_loaded, fixtures_loaded
 
 
 render_styles()
@@ -1494,23 +1505,49 @@ left_column, right_column = st.columns([1.55, 1])
 
 @st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
 def render_league_fragment() -> None:
-    owner_league_table, _group_tables, _playoff_tables, _upcoming_fixtures = load_live_dashboard_data(owners, owner_lookup)
+    (
+        owner_league_table,
+        _group_tables,
+        _playoff_tables,
+        _upcoming_fixtures,
+        standings_loaded,
+        _fixtures_loaded,
+    ) = load_live_dashboard_data(owners, owner_lookup)
     st.markdown('<div class="section-title">League Table</div>', unsafe_allow_html=True)
-    render_html_table(owner_league_table, {"W", "D", "L", "GF", "Points"})
+    if standings_loaded:
+        render_html_table(owner_league_table, {"W", "D", "L", "GF", "Points"})
+    else:
+        st.info("Loading live standings...")
 
 
 @st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
 def render_schedule_fragment() -> None:
-    _owner_league_table, group_tables, playoff_tables, upcoming_fixtures = load_live_dashboard_data(owners, owner_lookup)
+    (
+        _owner_league_table,
+        group_tables,
+        playoff_tables,
+        upcoming_fixtures,
+        standings_loaded,
+        fixtures_loaded,
+    ) = load_live_dashboard_data(owners, owner_lookup)
 
-    st.markdown('<div class="section-title">Upcoming Fixtures</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Fixtures</div>', unsafe_allow_html=True)
     fixture_dates = sorted(upcoming_fixtures["Date"].dropna().unique().tolist())
 
-    if fixture_dates:
+    if fixtures_loaded and fixture_dates:
         max_index = len(fixture_dates) - 1
-        if "fixture_date_index" not in st.session_state:
-            st.session_state.fixture_date_index = 0
-        st.session_state.fixture_date_index = max(0, min(st.session_state.fixture_date_index, max_index))
+        today_denmark = datetime.now(DENMARK_TZ).strftime("%Y-%m-%d")
+        default_index = next(
+            (index for index, date_value in enumerate(fixture_dates) if date_value >= today_denmark),
+            max_index,
+        )
+        selected_fixture_date = st.session_state.get("fixture_selected_date")
+        if selected_fixture_date in fixture_dates:
+            st.session_state.fixture_date_index = fixture_dates.index(selected_fixture_date)
+        elif "fixture_selected_date" not in st.session_state:
+            st.session_state.fixture_date_index = default_index
+        else:
+            st.session_state.fixture_date_index = max(0, min(st.session_state.fixture_date_index, max_index))
 
         previous_column, next_column, date_column, _spacer = st.columns([0.42, 0.42, 1.8, 7.36])
         with previous_column:
@@ -1534,6 +1571,7 @@ def render_schedule_fragment() -> None:
             st.session_state.fixture_date_index += 1
 
         selected_fixture_date = fixture_dates[st.session_state.fixture_date_index]
+        st.session_state.fixture_selected_date = selected_fixture_date
         with date_column:
             st.markdown(
                 f"<div class='fixture-date-label'>{selected_fixture_date}</div>",
@@ -1543,12 +1581,12 @@ def render_schedule_fragment() -> None:
         daily_games = upcoming_fixtures[upcoming_fixtures["Date"] == selected_fixture_date].reset_index(drop=True)
         render_html_table(daily_games, set())
     else:
-        st.info("No fixtures available.")
+        st.info("Loading fixtures from live sources...")
 
     st.markdown('<div class="section-title">Group Tables</div>', unsafe_allow_html=True)
     group_names = list(group_tables.keys())
 
-    if group_names:
+    if standings_loaded and group_names:
         for start_index in range(0, len(group_names), 3):
             row_columns = st.columns(3)
             for column, group_name in zip(row_columns, group_names[start_index:start_index + 3]):
@@ -1557,12 +1595,15 @@ def render_schedule_fragment() -> None:
                     render_html_table(group_tables[group_name], {"P", "W", "D", "L", "GD", "Pts"}, table_class="")
                     st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.info("No group standings available.")
+        st.info("Loading group standings from live sources...")
 
     st.markdown('<div class="section-title">Playoffs</div>', unsafe_allow_html=True)
-    for round_name, round_table in playoff_tables.items():
-        st.markdown(f"<div style='font-weight:700; color:#0f172a; margin:0.4rem 0 0.55rem 0;'>{round_name}</div>", unsafe_allow_html=True)
-        render_html_table(round_table, {"Match"}, table_class="table-card")
+    if standings_loaded and playoff_tables:
+        for round_name, round_table in playoff_tables.items():
+            st.markdown(f"<div style='font-weight:700; color:#0f172a; margin:0.4rem 0 0.55rem 0;'>{round_name}</div>", unsafe_allow_html=True)
+            render_html_table(round_table, {"Match"}, table_class="table-card")
+    else:
+        st.info("Loading playoff picture from live standings...")
 
 with left_column:
     render_league_fragment()
