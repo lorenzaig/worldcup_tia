@@ -1,17 +1,16 @@
 import html
 import json
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 
 st.set_page_config(
@@ -20,16 +19,29 @@ st.set_page_config(
     layout="wide",
 )
 
-LIVE_TABLE_URL = "https://www.thesportsdb.com/api/v1/json/123/lookuptable.php?l=4429&s=2026"
-LIVE_SEASON_GAMES_URL = "https://www.thesportsdb.com/api/v1/json/123/eventsseason.php?id=4429&s=2026"
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
-FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_API_TOKEN", "").strip()
 DATA_DIR = Path(__file__).resolve().parent
 CHAT_MESSAGES_PATH = DATA_DIR / "chat_messages.jsonl"
 DENMARK_TZ = ZoneInfo("Europe/Copenhagen")
 CHAT_OWNER_STATE_KEY = "chat_selected_owner"
-REFRESH_INTERVAL_SECONDS = 30
-WIKIPEDIA_API_TEMPLATE = "https://en.wikipedia.org/w/api.php?action=query&prop=revisions&rvprop=content&format=json&titles={title}"
+REFRESH_INTERVAL_SECONDS = 15 * 60
+REFRESH_NONCE_STATE_KEY = "live_refresh_nonce"
+REFRESH_KEY_STATE_KEY = "live_refresh_key"
+LAST_REFRESH_STATE_KEY = "live_last_refreshed_at"
+
+
+def load_football_data_token() -> str:
+    env_token = os.getenv("FOOTBALL_DATA_API_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    try:
+        return str(st.secrets.get("FOOTBALL_DATA_API_TOKEN", "")).strip()
+    except StreamlitSecretNotFoundError:
+        return ""
+
+
+FOOTBALL_DATA_TOKEN = load_football_data_token()
 
 TEAM_ALIASES = {
     "Bosnia-Herzegovina": "Bosnia and Herzegovina",
@@ -47,6 +59,8 @@ TEAM_ALIASES = {
     "Turkey": "Turkiye",
     "USA": "United States",
     "United States of America": "United States",
+    "Cape Verde Islands": "Cape Verde",
+    "Congo DR": "DR Congo",
 }
 
 TEAM_FLAGS = {
@@ -114,213 +128,6 @@ TEAM_FLAGS = {
     "Wales": "gb-wls",
 }
 
-OFFICIAL_GROUPS = {
-    "Group A": [
-        "Mexico",
-        "South Korea",
-        "South Africa",
-        "Czechia",
-    ],
-    "Group B": [
-        "Canada",
-        "Switzerland",
-        "Qatar",
-        "Bosnia and Herzegovina",
-    ],
-    "Group C": ["Brazil", "Morocco", "Scotland", "Haiti"],
-    "Group D": [
-        "United States",
-        "Paraguay",
-        "Australia",
-        "Turkiye",
-    ],
-    "Group E": ["Germany", "Ecuador", "Ivory Coast", "Curacao"],
-    "Group F": [
-        "Netherlands",
-        "Japan",
-        "Tunisia",
-        "Sweden",
-    ],
-    "Group G": ["Belgium", "Iran", "Egypt", "New Zealand"],
-    "Group H": ["Spain", "Uruguay", "Saudi Arabia", "Cape Verde"],
-    "Group I": [
-        "France",
-        "Senegal",
-        "Norway",
-        "Iraq",
-    ],
-    "Group J": ["Argentina", "Austria", "Algeria", "Jordan"],
-    "Group K": [
-        "Portugal",
-        "Colombia",
-        "Uzbekistan",
-        "DR Congo",
-    ],
-    "Group L": ["England", "Croatia", "Panama", "Ghana"],
-}
-
-WIKIPEDIA_GROUP_PAGE_TITLES = {
-    group_name: f"2026_FIFA_World_Cup_{group_name.replace(' ', '_')}"
-    for group_name in OFFICIAL_GROUPS
-}
-
-TEAM_CODE_TO_NAME = {
-    "ALG": "Algeria",
-    "ARG": "Argentina",
-    "AUS": "Australia",
-    "AUT": "Austria",
-    "BEL": "Belgium",
-    "BIH": "Bosnia and Herzegovina",
-    "BRA": "Brazil",
-    "CAN": "Canada",
-    "COD": "DR Congo",
-    "COL": "Colombia",
-    "CPV": "Cape Verde",
-    "CIV": "Ivory Coast",
-    "CRO": "Croatia",
-    "CUW": "Curacao",
-    "CZE": "Czechia",
-    "ECU": "Ecuador",
-    "EGY": "Egypt",
-    "ENG": "England",
-    "FRA": "France",
-    "GER": "Germany",
-    "GHA": "Ghana",
-    "HTI": "Haiti",
-    "IRQ": "Iraq",
-    "IRN": "Iran",
-    "JOR": "Jordan",
-    "JPN": "Japan",
-    "KOR": "South Korea",
-    "KSA": "Saudi Arabia",
-    "MAR": "Morocco",
-    "MEX": "Mexico",
-    "NED": "Netherlands",
-    "NOR": "Norway",
-    "NZL": "New Zealand",
-    "PAN": "Panama",
-    "PAR": "Paraguay",
-    "POR": "Portugal",
-    "QAT": "Qatar",
-    "RSA": "South Africa",
-    "SCO": "Scotland",
-    "SEN": "Senegal",
-    "ESP": "Spain",
-    "SUI": "Switzerland",
-    "SWE": "Sweden",
-    "TUN": "Tunisia",
-    "TUR": "Turkiye",
-    "URU": "Uruguay",
-    "USA": "United States",
-    "UZB": "Uzbekistan",
-}
-
-VENUE_TIMEZONES = {
-    "Arrowhead Stadium": ZoneInfo("America/Chicago"),
-    "AT&T Stadium": ZoneInfo("America/Chicago"),
-    "BC Place": ZoneInfo("America/Vancouver"),
-    "BMO Field": ZoneInfo("America/Toronto"),
-    "Estadio Akron": ZoneInfo("America/Mexico_City"),
-    "Estadio Azteca": ZoneInfo("America/Mexico_City"),
-    "Estadio BBVA": ZoneInfo("America/Monterrey"),
-    "Gillette Stadium": ZoneInfo("America/New_York"),
-    "Hard Rock Stadium": ZoneInfo("America/New_York"),
-    "Levi's Stadium": ZoneInfo("America/Los_Angeles"),
-    "Lincoln Financial Field": ZoneInfo("America/New_York"),
-    "Lumen Field": ZoneInfo("America/Los_Angeles"),
-    "Mercedes-Benz Stadium": ZoneInfo("America/New_York"),
-    "MetLife Stadium": ZoneInfo("America/New_York"),
-    "NRG Stadium": ZoneInfo("America/Chicago"),
-    "SoFi Stadium": ZoneInfo("America/Los_Angeles"),
-}
-
-PLAYOFF_MATCHES = [
-    {"round": "Round of 32", "match": 73, "date": "2026-06-28", "city": "Los Angeles Stadium", "team_1": "2A", "team_2": "2B"},
-    {"round": "Round of 32", "match": 74, "date": "2026-06-29", "city": "Boston Stadium", "team_1": "1E", "team_2": "3P1E"},
-    {"round": "Round of 32", "match": 75, "date": "2026-06-29", "city": "Estadio Monterrey", "team_1": "1F", "team_2": "2C"},
-    {"round": "Round of 32", "match": 76, "date": "2026-06-29", "city": "Houston Stadium", "team_1": "1C", "team_2": "2F"},
-    {"round": "Round of 32", "match": 77, "date": "2026-06-30", "city": "New York New Jersey Stadium", "team_1": "1I", "team_2": "3P1I"},
-    {"round": "Round of 32", "match": 78, "date": "2026-06-30", "city": "Dallas Stadium", "team_1": "2E", "team_2": "2I"},
-    {"round": "Round of 32", "match": 79, "date": "2026-06-30", "city": "Mexico City Stadium", "team_1": "1A", "team_2": "3P1A"},
-    {"round": "Round of 32", "match": 80, "date": "2026-07-01", "city": "Atlanta Stadium", "team_1": "1L", "team_2": "3P1L"},
-    {"round": "Round of 32", "match": 81, "date": "2026-07-01", "city": "San Francisco Bay Area Stadium", "team_1": "1D", "team_2": "3P1D"},
-    {"round": "Round of 32", "match": 82, "date": "2026-07-01", "city": "Seattle Stadium", "team_1": "1G", "team_2": "3P1G"},
-    {"round": "Round of 32", "match": 83, "date": "2026-07-02", "city": "Toronto Stadium", "team_1": "2K", "team_2": "2L"},
-    {"round": "Round of 32", "match": 84, "date": "2026-07-02", "city": "Los Angeles Stadium", "team_1": "1H", "team_2": "2J"},
-    {"round": "Round of 32", "match": 85, "date": "2026-07-02", "city": "BC Place Vancouver", "team_1": "1B", "team_2": "3P1B"},
-    {"round": "Round of 32", "match": 86, "date": "2026-07-03", "city": "Miami Stadium", "team_1": "1J", "team_2": "2H"},
-    {"round": "Round of 32", "match": 87, "date": "2026-07-03", "city": "Kansas City Stadium", "team_1": "1K", "team_2": "3P1K"},
-    {"round": "Round of 32", "match": 88, "date": "2026-07-03", "city": "Dallas Stadium", "team_1": "2D", "team_2": "2G"},
-    {"round": "Round of 16", "match": 89, "date": "2026-07-04", "city": "Philadelphia Stadium", "team_1": "W74", "team_2": "W77"},
-    {"round": "Round of 16", "match": 90, "date": "2026-07-04", "city": "Houston Stadium", "team_1": "W73", "team_2": "W75"},
-    {"round": "Round of 16", "match": 91, "date": "2026-07-05", "city": "New York New Jersey Stadium", "team_1": "W76", "team_2": "W78"},
-    {"round": "Round of 16", "match": 92, "date": "2026-07-05", "city": "Mexico City Stadium", "team_1": "W79", "team_2": "W80"},
-    {"round": "Round of 16", "match": 93, "date": "2026-07-06", "city": "Dallas Stadium", "team_1": "W83", "team_2": "W84"},
-    {"round": "Round of 16", "match": 94, "date": "2026-07-06", "city": "Seattle Stadium", "team_1": "W81", "team_2": "W82"},
-    {"round": "Round of 16", "match": 95, "date": "2026-07-07", "city": "Atlanta Stadium", "team_1": "W86", "team_2": "W88"},
-    {"round": "Round of 16", "match": 96, "date": "2026-07-07", "city": "BC Place Vancouver", "team_1": "W85", "team_2": "W87"},
-    {"round": "Quarter-finals", "match": 97, "date": "2026-07-09", "city": "Boston Stadium", "team_1": "W89", "team_2": "W90"},
-    {"round": "Quarter-finals", "match": 98, "date": "2026-07-10", "city": "Los Angeles Stadium", "team_1": "W93", "team_2": "W94"},
-    {"round": "Quarter-finals", "match": 99, "date": "2026-07-11", "city": "Miami Stadium", "team_1": "W91", "team_2": "W92"},
-    {"round": "Quarter-finals", "match": 100, "date": "2026-07-11", "city": "Kansas City Stadium", "team_1": "W95", "team_2": "W96"},
-    {"round": "Semi-finals", "match": 101, "date": "2026-07-14", "city": "Dallas Stadium", "team_1": "W97", "team_2": "W98"},
-    {"round": "Semi-finals", "match": 102, "date": "2026-07-15", "city": "Atlanta Stadium", "team_1": "W99", "team_2": "W100"},
-    {"round": "Third Place", "match": 103, "date": "2026-07-18", "city": "Miami Stadium", "team_1": "L101", "team_2": "L102"},
-    {"round": "Final", "match": 104, "date": "2026-07-19", "city": "New York New Jersey Stadium", "team_1": "W101", "team_2": "W102"},
-]
-
-THIRD_PLACE_SLOT_POOLS = {
-    "1A": "CEFHI",
-    "1B": "EFGIJ",
-    "1D": "BEFIJ",
-    "1E": "ABCDF",
-    "1G": "AEHIJ",
-    "1I": "CDFGH",
-    "1K": "DEIJL",
-    "1L": "EHIJK",
-}
-
-THIRD_PLACE_COMBINATION_MAP = {
-    "EFGHIJKL": {"1A": "E", "1B": "J", "1D": "I", "1E": "F", "1G": "H", "1I": "G", "1K": "L", "1L": "K"},
-    "DFGHIJKL": {"1A": "H", "1B": "G", "1D": "I", "1E": "D", "1G": "J", "1I": "F", "1K": "L", "1L": "K"},
-    "DEGHIJKL": {"1A": "E", "1B": "J", "1D": "I", "1E": "D", "1G": "H", "1I": "G", "1K": "L", "1L": "K"},
-    "DEFHIJKL": {"1A": "E", "1B": "J", "1D": "I", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "DEFGIJKL": {"1A": "E", "1B": "G", "1D": "I", "1E": "D", "1G": "J", "1I": "F", "1K": "L", "1L": "K"},
-    "DEFGHJKL": {"1A": "E", "1B": "G", "1D": "J", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "DEFGHIKL": {"1A": "E", "1B": "G", "1D": "I", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "DEFGHIJL": {"1A": "E", "1B": "G", "1D": "J", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "I"},
-    "DEFGHIJK": {"1A": "E", "1B": "G", "1D": "J", "1E": "D", "1G": "H", "1I": "F", "1K": "I", "1L": "K"},
-    "CFGHIJKL": {"1A": "H", "1B": "G", "1D": "I", "1E": "C", "1G": "J", "1I": "F", "1K": "L", "1L": "K"},
-    "CEGHIJKL": {"1A": "E", "1B": "J", "1D": "I", "1E": "C", "1G": "H", "1I": "G", "1K": "L", "1L": "K"},
-    "CEFHIJKL": {"1A": "E", "1B": "J", "1D": "I", "1E": "C", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CEFGIJKL": {"1A": "E", "1B": "G", "1D": "I", "1E": "C", "1G": "J", "1I": "F", "1K": "L", "1L": "K"},
-    "CEFGHJKL": {"1A": "E", "1B": "G", "1D": "J", "1E": "C", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CEFGHIKL": {"1A": "E", "1B": "G", "1D": "I", "1E": "C", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CEFGHIJL": {"1A": "E", "1B": "G", "1D": "J", "1E": "C", "1G": "H", "1I": "F", "1K": "L", "1L": "I"},
-    "CEFGHIJK": {"1A": "E", "1B": "G", "1D": "J", "1E": "C", "1G": "H", "1I": "F", "1K": "I", "1L": "K"},
-    "CDGHIJKL": {"1A": "H", "1B": "G", "1D": "I", "1E": "C", "1G": "J", "1I": "D", "1K": "L", "1L": "K"},
-    "CDFHIJKL": {"1A": "C", "1B": "J", "1D": "I", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CDFGIJKL": {"1A": "C", "1B": "G", "1D": "I", "1E": "D", "1G": "J", "1I": "F", "1K": "L", "1L": "K"},
-    "CDFGHJKL": {"1A": "C", "1B": "G", "1D": "J", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CDFGHIKL": {"1A": "C", "1B": "G", "1D": "I", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CDFGHIJL": {"1A": "C", "1B": "G", "1D": "J", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "I"},
-    "CDFGHIJK": {"1A": "C", "1B": "G", "1D": "J", "1E": "D", "1G": "H", "1I": "F", "1K": "I", "1L": "K"},
-    "CDEHIJKL": {"1A": "E", "1B": "J", "1D": "I", "1E": "C", "1G": "H", "1I": "D", "1K": "L", "1L": "K"},
-    "CDEGIJKL": {"1A": "E", "1B": "G", "1D": "I", "1E": "C", "1G": "J", "1I": "D", "1K": "L", "1L": "K"},
-    "CDEGHJKL": {"1A": "E", "1B": "G", "1D": "J", "1E": "C", "1G": "H", "1I": "D", "1K": "L", "1L": "K"},
-    "CDEGHIKL": {"1A": "E", "1B": "G", "1D": "I", "1E": "C", "1G": "H", "1I": "D", "1K": "L", "1L": "K"},
-    "CDEGHIJL": {"1A": "E", "1B": "G", "1D": "J", "1E": "C", "1G": "H", "1I": "D", "1K": "L", "1L": "I"},
-    "CDEGHIJK": {"1A": "E", "1B": "G", "1D": "J", "1E": "C", "1G": "H", "1I": "D", "1K": "I", "1L": "K"},
-    "CDEFIJKL": {"1A": "C", "1B": "J", "1D": "E", "1E": "D", "1G": "I", "1I": "F", "1K": "L", "1L": "K"},
-    "CDEFHJKL": {"1A": "C", "1B": "J", "1D": "E", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CDEFHIKL": {"1A": "C", "1B": "E", "1D": "I", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "K"},
-    "CDEFHIJL": {"1A": "C", "1B": "J", "1D": "E", "1E": "D", "1G": "H", "1I": "F", "1K": "L", "1L": "I"},
-    "CDEFHIJK": {"1A": "C", "1B": "J", "1D": "E", "1E": "D", "1G": "H", "1I": "F", "1K": "I", "1L": "K"},
-    "CDEFGJKL": {"1A": "C", "1B": "G", "1D": "E", "1E": "D", "1G": "J", "1I": "F", "1K": "L", "1L": "K"},
-    "CDEFGIKL": {"1A": "C", "1B": "G", "1D": "E", "1E": "D", "1G": "I", "1I": "F", "1K": "L", "1L": "K"},
-    "CDEFGIJL": {"1A": "C", "1B": "G", "1D": "E", "1E": "D", "1G": "J", "1I": "F", "1K": "L", "1L": "I"},
-    "CDEFGIJK": {"1A": "C", "1B": "G", "1D": "E", "1E": "D", "1G": "J", "1I": "F", "1K": "I", "1L": "K"},
-}
 
 POINTS_RULES = [
     {"Rule": "Match win", "Points": "3"},
@@ -333,6 +140,7 @@ POINTS_RULES = [
 STANDINGS_COLUMNS = ["group", "team", "played", "won", "drawn", "lost", "gf", "gd", "points"]
 OWNER_LEAGUE_COLUMNS = ["Owner", "Teams", "W", "D", "L", "GF", "Points"]
 FIXTURE_COLUMNS = ["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]
+MATCH_COLUMNS = ["date", "time", "group", "home_team", "away_team", "city", "home_score", "away_score"]
 
 
 def render_styles() -> None:
@@ -362,6 +170,19 @@ def render_styles() -> None:
                 font-size: 2.6rem;
                 color: #0f172a;
                 margin-bottom: 1rem;
+            }
+            .refresh-note {
+                color: #475569;
+                font-size: 0.78rem;
+                font-weight: 700;
+                line-height: 1.25;
+                margin-top: 0.35rem;
+                margin-bottom: 0.35rem;
+                text-align: right;
+            }
+            .refresh-note span {
+                color: #0f172a;
+                font-size: 0.9rem;
             }
             .table-card {
                 background: rgba(255, 255, 255, 0.92);
@@ -576,6 +397,10 @@ def render_styles() -> None:
                     line-height: 1.08;
                     margin-bottom: 0.8rem;
                 }
+                .refresh-note {
+                    text-align: left;
+                    margin-top: 0;
+                }
                 .section-title {
                     font-size: 1.15rem;
                     margin-bottom: 0.55rem;
@@ -646,9 +471,6 @@ def canonical_team_name(team_name: Optional[str]) -> str:
         return "-"
     return TEAM_ALIASES.get(team_name, team_name)
 
-
-def team_flag(team_name: str) -> str:
-    return TEAM_FLAGS.get(canonical_team_name(team_name), canonical_team_name(team_name))
 
 
 def flag_icon(team_name: str) -> str:
@@ -761,78 +583,39 @@ def parse_denmark_kickoff(date_value: Optional[str], time_value: Optional[str]) 
         return date_value, time_value[:5]
 
 
-def current_refresh_key(interval_seconds: int) -> str:
+def current_refresh_key(interval_seconds: int, manual_nonce: int = 0) -> str:
     now = datetime.now(DENMARK_TZ)
-    return f"{now.strftime('%Y-%m-%d')}-{int(now.timestamp() // interval_seconds)}"
+    refresh_bucket = int(now.timestamp() // interval_seconds)
+    return f"{now.strftime('%Y-%m-%d')}-{refresh_bucket}-{manual_nonce}"
 
 
-def wikipedia_api_url(page_title: str) -> str:
-    return WIKIPEDIA_API_TEMPLATE.format(title=quote(page_title))
+def get_live_refresh_key() -> str:
+    manual_nonce = int(st.session_state.get(REFRESH_NONCE_STATE_KEY, 0))
+    refresh_key = current_refresh_key(REFRESH_INTERVAL_SECONDS, manual_nonce)
+    if st.session_state.get(REFRESH_KEY_STATE_KEY) != refresh_key:
+        st.session_state[REFRESH_KEY_STATE_KEY] = refresh_key
+        st.session_state[LAST_REFRESH_STATE_KEY] = datetime.now(DENMARK_TZ)
+    return refresh_key
 
 
-def strip_wiki_markup(value: str) -> str:
-    cleaned = value.replace("&nbsp;", " ")
-    cleaned = re.sub(r"<[^>]+>", "", cleaned)
-    cleaned = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", cleaned)
-    cleaned = re.sub(r"\[\[([^\]]+)\]\]", r"\1", cleaned)
-    return re.sub(r"\s+", " ", html.unescape(cleaned)).strip(" ,")
+def request_manual_refresh() -> None:
+    st.session_state[REFRESH_NONCE_STATE_KEY] = int(st.session_state.get(REFRESH_NONCE_STATE_KEY, 0)) + 1
+    st.session_state.pop(REFRESH_KEY_STATE_KEY, None)
+    st.session_state[LAST_REFRESH_STATE_KEY] = datetime.now(DENMARK_TZ)
+    fetch_json.clear()
 
 
-def extract_wiki_field(block: str, field_name: str) -> str:
-    match = re.search(
-        rf"\|{re.escape(field_name)}=(.*?)(?=\n\|[A-Za-z0-9_]+=|\Z)",
-        block,
-        flags=re.S,
-    )
-    return match.group(1).strip() if match else ""
+def format_last_refreshed_at() -> str:
+    last_refreshed_at = st.session_state.get(LAST_REFRESH_STATE_KEY)
+    if isinstance(last_refreshed_at, datetime):
+        return last_refreshed_at.strftime("%Y-%m-%d %H:%M:%S %Z")
+    return "Updating now"
 
 
-def parse_wikipedia_score(score_value: str, goals_1: str, goals_2: str) -> tuple[Optional[int], Optional[int]]:
-    if not score_value or "Match " in score_value:
-        return None, None
-
-    score_token = re.sub(r"[{}]", "", score_value.rsplit("|", 1)[-1]).strip()
-    explicit_score = re.search(r"(\d+)[^\d]+(\d+)", score_token)
-    if explicit_score:
-        return int(explicit_score.group(1)), int(explicit_score.group(2))
-
-    compact_token = re.sub(r"\s+", "", score_token)
-    if compact_token.isdigit():
-        if len(compact_token) == 2:
-            return int(compact_token[0]), int(compact_token[1])
-        if len(compact_token) >= 3:
-            return int(compact_token[:-1]), int(compact_token[-1])
-
-    goals_1_total = len(re.findall(r"\{\{goal\|", goals_1 or ""))
-    goals_2_total = len(re.findall(r"\{\{goal\|", goals_2 or ""))
-    if goals_1_total or goals_2_total:
-        return goals_1_total, goals_2_total
-
-    return None, None
-
-
-def parse_wikipedia_time_to_denmark(date_value: str, time_value: str, venue_value: str) -> tuple[str, str]:
-    cleaned_time = strip_wiki_markup(time_value).replace("a.m.", "AM").replace("p.m.", "PM")
-    cleaned_time = cleaned_time.replace("a.m", "AM").replace("p.m", "PM").upper()
-    cleaned_time = re.sub(r"\s+UTC.*$", "", cleaned_time).strip()
-
-    venue_timezone = None
-    for venue_name, timezone_name in VENUE_TIMEZONES.items():
-        if venue_name in venue_value:
-            venue_timezone = timezone_name
-            break
-
-    if not cleaned_time or venue_timezone is None:
-        return date_value, "-"
-
-    try:
-        local_kickoff = datetime.strptime(f"{date_value} {cleaned_time}", "%Y-%m-%d %I:%M %p").replace(
-            tzinfo=venue_timezone
-        )
-        denmark_kickoff = local_kickoff.astimezone(DENMARK_TZ)
-        return denmark_kickoff.strftime("%Y-%m-%d"), denmark_kickoff.strftime("%H:%M")
-    except ValueError:
-        return date_value, "-"
+def live_unavailable_message(data_type: str) -> str:
+    if not FOOTBALL_DATA_TOKEN:
+        return f"Set FOOTBALL_DATA_API_TOKEN as an environment variable or Streamlit secret to load live {data_type}."
+    return f"Live {data_type} are unavailable from football-data.org right now."
 
 
 def load_chat_messages() -> list[dict]:
@@ -890,124 +673,45 @@ def empty_standings() -> pd.DataFrame:
     return pd.DataFrame(columns=STANDINGS_COLUMNS)
 
 
-def parse_wikipedia_group_page(wikitext: str, group_name: str) -> list[dict]:
-    match_pattern = re.compile(
-        r"<section begin=(?P<section>[A-Z]\d+)\s*/>\{\{#invoke:football box\|main(?P<body>.*?)\}\}<section end=(?P=section)\s*/>",
-        flags=re.S,
-    )
-    parsed_matches = []
+def empty_matches() -> pd.DataFrame:
+    return pd.DataFrame(columns=MATCH_COLUMNS)
 
-    for match in match_pattern.finditer(wikitext):
-        block = match.group("body")
-        team_1_code = re.search(r"\|([A-Z]{3})\}\}$", extract_wiki_field(block, "team1"))
-        team_2_code = re.search(r"\|([A-Z]{3})\}\}$", extract_wiki_field(block, "team2"))
 
-        if not team_1_code or not team_2_code:
+def group_letter_from_api(group_name: Optional[str]) -> str:
+    return (group_name or "").replace("GROUP_", "").strip()
+
+
+def build_team_group_lookup(matches: pd.DataFrame) -> dict[str, str]:
+    if matches.empty or "group" not in matches.columns:
+        return {}
+
+    group_lookup = {}
+    for _, match in matches.iterrows():
+        group_name = str(match.get("group") or "").strip()
+        if not group_name:
             continue
 
-        team_1 = TEAM_CODE_TO_NAME.get(team_1_code.group(1))
-        team_2 = TEAM_CODE_TO_NAME.get(team_2_code.group(1))
-        if not team_1 or not team_2:
-            continue
+        for team_column in ("home_team", "away_team"):
+            team_name = canonical_team_name(match.get(team_column))
+            if team_name and team_name != "-":
+                group_lookup.setdefault(team_name, group_name)
 
-        date_match = re.search(r"\{\{Start date\|(\d{4})\|(\d{1,2})\|(\d{1,2})\}\}", extract_wiki_field(block, "date"))
-        if not date_match:
-            continue
+    return group_lookup
 
-        date_value = f"{date_match.group(1)}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
-        time_value = extract_wiki_field(block, "time")
-        venue_value = strip_wiki_markup(extract_wiki_field(block, "stadium"))
-        score_value = extract_wiki_field(block, "score")
-        goals_1 = extract_wiki_field(block, "goals1")
-        goals_2 = extract_wiki_field(block, "goals2")
-        home_score, away_score = parse_wikipedia_score(score_value, goals_1, goals_2)
-        denmark_date, denmark_time = parse_wikipedia_time_to_denmark(date_value, time_value, venue_value)
 
-        parsed_matches.append(
-            {
-                "group": group_name.split()[-1],
-                "date": denmark_date,
-                "time": denmark_time,
-                "home_team": canonical_team_name(team_1),
-                "away_team": canonical_team_name(team_2),
-                "city": venue_value or "-",
-                "home_score": home_score,
-                "away_score": away_score,
-            }
+def apply_group_lookup_to_standings(standings: pd.DataFrame, group_lookup: dict[str, str]) -> pd.DataFrame:
+    if standings.empty:
+        return standings
+
+    live_standings = standings.copy()
+    live_standings["group"] = live_standings["group"].fillna("").astype(str).str.strip()
+    if group_lookup:
+        missing_group = live_standings["group"] == ""
+        live_standings.loc[missing_group, "group"] = (
+            live_standings.loc[missing_group, "team"].map(group_lookup).fillna("")
         )
 
-    return parsed_matches
-
-
-@st.cache_data(show_spinner=False)
-def load_wikipedia_group_stage_data(day_key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    matches = []
-    for group_name, page_title in WIKIPEDIA_GROUP_PAGE_TITLES.items():
-        try:
-            payload = fetch_json(wikipedia_api_url(page_title), day_key)
-        except (URLError, TimeoutError, OSError, ValueError):
-            continue
-
-        pages = payload.get("query", {}).get("pages", {})
-        page = next(iter(pages.values()), {})
-        revisions = page.get("revisions") or []
-        if not revisions:
-            continue
-
-        wikitext = revisions[0].get("*", "")
-        if not wikitext:
-            continue
-
-        matches.extend(parse_wikipedia_group_page(wikitext, group_name))
-
-    matches_dataframe = pd.DataFrame(matches)
-    if matches_dataframe.empty:
-        return empty_standings(), pd.DataFrame()
-
-    standings_rows = []
-    for group_name, teams in OFFICIAL_GROUPS.items():
-        group_letter = group_name.split()[-1]
-        group_matches = matches_dataframe[
-            (matches_dataframe["group"] == group_letter)
-            & matches_dataframe["home_score"].notna()
-            & matches_dataframe["away_score"].notna()
-        ]
-
-        for team_name in teams:
-            team_matches = group_matches[
-                (group_matches["home_team"] == team_name) | (group_matches["away_team"] == team_name)
-            ]
-            played = len(team_matches)
-            won = drawn = lost = gf = ga = 0
-
-            for _, match_row in team_matches.iterrows():
-                is_home_team = match_row["home_team"] == team_name
-                team_goals = int(match_row["home_score"] if is_home_team else match_row["away_score"])
-                opponent_goals = int(match_row["away_score"] if is_home_team else match_row["home_score"])
-                gf += team_goals
-                ga += opponent_goals
-                if team_goals > opponent_goals:
-                    won += 1
-                elif team_goals == opponent_goals:
-                    drawn += 1
-                else:
-                    lost += 1
-
-            standings_rows.append(
-                {
-                    "group": group_letter,
-                    "team": team_name,
-                    "played": played,
-                    "won": won,
-                    "drawn": drawn,
-                    "lost": lost,
-                    "gf": gf,
-                    "gd": gf - ga,
-                    "points": won * 3 + drawn,
-                }
-            )
-
-    return pd.DataFrame(standings_rows), matches_dataframe
+    return live_standings
 
 
 def build_fixture_table_from_matches(matches: pd.DataFrame, owner_lookup: dict[str, str]) -> pd.DataFrame:
@@ -1037,44 +741,15 @@ def build_fixture_table_from_matches(matches: pd.DataFrame, owner_lookup: dict[s
     return fixtures[["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]]
 
 
-def has_recorded_results(standings: pd.DataFrame) -> bool:
-    if standings.empty:
-        return False
-    result_columns = ["played", "won", "drawn", "lost", "gf", "points"]
-    available_columns = [column for column in result_columns if column in standings.columns]
-    if not available_columns:
-        return False
-    return standings[available_columns].fillna(0).astype(int).to_numpy().sum() > 0
-
-
-def parse_standings_payload(payload: dict) -> pd.DataFrame:
-    rows = payload.get("table") or []
-    parsed_rows = []
-
-    for row in rows:
-        parsed_rows.append(
-            {
-                "group": row.get("strGroup") or row.get("strDescription") or "Table",
-                "team": canonical_team_name(row.get("strTeam") or row.get("name") or "-"),
-                "played": int(row.get("intPlayed") or row.get("played") or 0),
-                "won": int(row.get("intWin") or row.get("win") or 0),
-                "drawn": int(row.get("intDraw") or row.get("draw") or 0),
-                "lost": int(row.get("intLoss") or row.get("loss") or 0),
-                "gf": int(row.get("intGoalsFor") or row.get("goalsfor") or 0),
-                "gd": int(row.get("intGoalDifference") or row.get("goaldifference") or 0),
-                "points": int(row.get("intPoints") or row.get("points") or 0),
-            }
-        )
-
-    return pd.DataFrame(parsed_rows)
-
-
 def parse_football_data_standings_payload(payload: dict) -> pd.DataFrame:
     standings_rows = []
 
     for standings_block in payload.get("standings") or []:
-        group_name = standings_block.get("group") or "GROUP_STAGE"
-        group_letter = group_name.replace("GROUP_", "")
+        table_type = str(standings_block.get("type") or "").upper()
+        if table_type and table_type != "TOTAL":
+            continue
+
+        group_letter = group_letter_from_api(standings_block.get("group"))
         for row in standings_block.get("table") or []:
             team_data = row.get("team") or {}
             standings_rows.append(
@@ -1091,11 +766,12 @@ def parse_football_data_standings_payload(payload: dict) -> pd.DataFrame:
                 }
             )
 
-    return pd.DataFrame(standings_rows)
+    standings = pd.DataFrame(standings_rows, columns=STANDINGS_COLUMNS)
+    return standings.drop_duplicates(subset=["group", "team"], keep="first").reset_index(drop=True)
 
 
-def parse_football_data_matches_payload(payload: dict, owner_lookup: dict[str, str]) -> pd.DataFrame:
-    fixture_rows = []
+def parse_football_data_matches_payload(payload: dict) -> pd.DataFrame:
+    match_rows = []
 
     for row in payload.get("matches") or []:
         home_team = canonical_team_name((row.get("homeTeam") or {}).get("name") or "-")
@@ -1108,22 +784,47 @@ def parse_football_data_matches_payload(payload: dict, owner_lookup: dict[str, s
 
         score = row.get("score") or {}
         regular_time = score.get("regularTime") or {}
+        full_time = score.get("fullTime") or {}
         home_score = regular_time.get("home")
         away_score = regular_time.get("away")
+        if home_score is None or away_score is None:
+            home_score = full_time.get("home")
+            away_score = full_time.get("away")
 
-        fixture_rows.append(
+        match_rows.append(
             {
-                "Date": denmark_date,
-                "Time (Denmark)": denmark_time,
-                "Team 1 (Owner)": f"{format_team_with_flag(home_team)} ({owner_lookup.get(home_team, 'Unassigned')})",
-                "Team 2 (Owner)": f"{format_team_with_flag(away_team)} ({owner_lookup.get(away_team, 'Unassigned')})",
-                "City": row.get("venue") or "-",
-                "Score": "-" if home_score is None or away_score is None else f"{home_score}-{away_score}",
+                "date": denmark_date,
+                "time": denmark_time,
+                "group": group_letter_from_api(row.get("group")),
+                "home_team": home_team,
+                "away_team": away_team,
+                "city": row.get("venue") or "-",
+                "home_score": home_score,
+                "away_score": away_score,
             }
         )
 
-    return pd.DataFrame(fixture_rows)
+    return pd.DataFrame(match_rows, columns=MATCH_COLUMNS)
 
+
+def load_football_data_matches(day_key: str) -> tuple[pd.DataFrame, bool]:
+    if not FOOTBALL_DATA_TOKEN:
+        return empty_matches(), False
+
+    try:
+        payload = fetch_json(
+            f"{FOOTBALL_DATA_BASE_URL}/competitions/WC/matches?season=2026",
+            day_key,
+            auth_token=FOOTBALL_DATA_TOKEN,
+            unfold_goals=True,
+        )
+        matches = parse_football_data_matches_payload(payload)
+        if not matches.empty:
+            return matches, True
+    except (URLError, TimeoutError, OSError, ValueError):
+        pass
+
+    return empty_matches(), False
 
 def load_football_data_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
     if not FOOTBALL_DATA_TOKEN:
@@ -1145,57 +846,33 @@ def load_football_data_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
 
 
 def load_football_data_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[pd.DataFrame, bool]:
-    if not FOOTBALL_DATA_TOKEN:
-        return pd.DataFrame(), False
-
-    try:
-        payload = fetch_json(
-            f"{FOOTBALL_DATA_BASE_URL}/competitions/WC/matches?season=2026",
-            day_key,
-            auth_token=FOOTBALL_DATA_TOKEN,
-            unfold_goals=True,
-        )
-        fixtures = parse_football_data_matches_payload(payload, owner_lookup)
+    matches, matches_loaded = load_football_data_matches(day_key)
+    if matches_loaded and not matches.empty:
+        fixtures = build_fixture_table_from_matches(matches, owner_lookup)
         if not fixtures.empty:
             return fixtures, True
-    except (URLError, TimeoutError, OSError, ValueError):
-        pass
 
-    return pd.DataFrame(), False
-
+    return empty_fixtures(), False
 
 def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
-    football_data_standings, football_data_loaded = load_football_data_standings(day_key)
-    if football_data_loaded:
-        return football_data_standings, True
-
-    wiki_standings, wiki_matches = load_wikipedia_group_stage_data(day_key)
-    if not wiki_matches.empty:
-        return wiki_standings, True
-
-    try:
-        payload = fetch_json(LIVE_TABLE_URL, day_key)
-        standings = parse_standings_payload(payload)
-        if has_recorded_results(standings):
-            return standings, True
-    except (URLError, TimeoutError, OSError, ValueError):
-        pass
-    return empty_standings(), False
-
+    return load_football_data_standings(day_key)
 
 def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> pd.DataFrame:
-    merged = owners.merge(standings[["team", "won", "drawn", "lost", "gf", "points"]], on="team", how="left")
-    merged["won"] = merged["won"].fillna(0).astype(int)
-    merged["drawn"] = merged["drawn"].fillna(0).astype(int)
-    merged["lost"] = merged["lost"].fillna(0).astype(int)
-    merged["points"] = merged["points"].fillna(0).astype(int)
-    merged["gf"] = merged["gf"].fillna(0).astype(int)
+    merged = owners.merge(standings[["team", "won", "drawn", "lost", "gf", "points"]], on="team", how="inner")
+    if merged.empty:
+        return pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
+
+    merged["won"] = merged["won"].astype(int)
+    merged["drawn"] = merged["drawn"].astype(int)
+    merged["lost"] = merged["lost"].astype(int)
+    merged["points"] = merged["points"].astype(int)
+    merged["gf"] = merged["gf"].astype(int)
     merged["owner_points"] = merged["points"] + merged["gf"]
 
     league_table = (
         merged.groupby("player", as_index=False)
         .agg(
-            Teams=("team", lambda teams: " ".join(flag_icon(team) for team in sorted(teams))),
+            Teams=("team", lambda teams: " ".join(flag_icon(team) for team in sorted(pd.unique(teams)))),
             W=("won", "sum"),
             D=("drawn", "sum"),
             L=("lost", "sum"),
@@ -1210,231 +887,43 @@ def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> p
 
 
 def build_group_tables(standings: pd.DataFrame, owner_lookup: dict[str, str]) -> dict[str, pd.DataFrame]:
-    standings_lookup = (
-        standings.set_index("team")[["played", "won", "drawn", "lost", "gf", "gd", "points"]].to_dict("index")
-        if not standings.empty
-        else {}
-    )
+    if standings.empty:
+        return {}
 
+    live_standings = standings.copy()
+    live_standings["group"] = live_standings["group"].fillna("").astype(str).str.strip()
+    live_standings = live_standings.drop_duplicates(subset=["group", "team"], keep="first")
+    if (live_standings["group"] == "").all():
+        return {}
+
+    live_standings.loc[live_standings["group"] == "", "group"] = "Ungrouped"
     tables = {}
-    for group_name, teams in OFFICIAL_GROUPS.items():
-        group_rows = []
-        for team_name in teams:
-            team_stats = standings_lookup.get(team_name, {})
-            group_rows.append(
+
+    for group_name, group_rows in live_standings.groupby("group", sort=True):
+        table_rows = []
+        for _, team_stats in group_rows.iterrows():
+            team_name = canonical_team_name(team_stats["team"])
+            table_rows.append(
                 {
                     "Flag": flag_icon(team_name),
-                    "Team": canonical_team_name(team_name),
+                    "Team": team_name,
                     "Owner": owner_lookup.get(team_name, "Unassigned"),
-                    "P": int(team_stats.get("played", 0)),
-                    "W": int(team_stats.get("won", 0)),
-                    "D": int(team_stats.get("drawn", 0)),
-                    "L": int(team_stats.get("lost", 0)),
-                    "GD": int(team_stats.get("gd", 0)),
-                    "Pts": int(team_stats.get("points", 0)),
+                    "P": int(team_stats["played"]),
+                    "W": int(team_stats["won"]),
+                    "D": int(team_stats["drawn"]),
+                    "L": int(team_stats["lost"]),
+                    "GD": int(team_stats["gd"]),
+                    "Pts": int(team_stats["points"]),
                 }
             )
 
-        group_table = pd.DataFrame(group_rows).sort_values(
+        group_table = pd.DataFrame(table_rows).sort_values(
             ["Pts", "GD", "W", "Team"],
             ascending=[False, False, False, True],
         ).reset_index(drop=True)
-        tables[group_name] = group_table
+        tables[f"Group {group_name}"] = group_table
 
     return tables
-
-
-def build_group_rankings(standings: pd.DataFrame) -> dict[str, list[str]]:
-    standings_lookup = (
-        standings.set_index("team")[["played", "won", "drawn", "lost", "gf", "gd", "points"]].to_dict("index")
-        if not standings.empty
-        else {}
-    )
-
-    group_rankings = {}
-    for group_name, teams in OFFICIAL_GROUPS.items():
-        group_rows = []
-        for team_name in teams:
-            team_stats = standings_lookup.get(team_name)
-            if not team_stats:
-                group_rows = []
-                break
-            group_rows.append(
-                {
-                    "team": team_name,
-                    "played": int(team_stats.get("played", 0)),
-                    "points": int(team_stats.get("points", 0)),
-                    "gd": int(team_stats.get("gd", 0)),
-                    "gf": int(team_stats.get("gf", 0)),
-                }
-            )
-
-        if len(group_rows) != 4 or any(row["played"] < 3 for row in group_rows):
-            continue
-
-        ranked_rows = sorted(
-            group_rows,
-            key=lambda row: (-row["points"], -row["gd"], -row["gf"], row["team"]),
-        )
-        group_rankings[group_name] = [row["team"] for row in ranked_rows]
-
-    return group_rankings
-
-
-def build_third_place_slot_assignments(
-    standings: pd.DataFrame,
-    group_rankings: dict[str, list[str]],
-) -> dict[str, str]:
-    if len(group_rankings) != len(OFFICIAL_GROUPS):
-        return {}
-
-    standings_lookup = (
-        standings.set_index("team")[["points", "gd", "gf"]].to_dict("index")
-        if not standings.empty
-        else {}
-    )
-
-    third_place_rows = []
-    for group_name, ranked_teams in group_rankings.items():
-        third_team = ranked_teams[2]
-        team_stats = standings_lookup.get(third_team)
-        if not team_stats:
-            return {}
-        third_place_rows.append(
-            {
-                "group_letter": group_name[-1],
-                "team": third_team,
-                "points": int(team_stats.get("points", 0)),
-                "gd": int(team_stats.get("gd", 0)),
-                "gf": int(team_stats.get("gf", 0)),
-            }
-        )
-
-    ranked_third_places = sorted(
-        third_place_rows,
-        key=lambda row: (-row["points"], -row["gd"], -row["gf"], row["group_letter"]),
-    )
-    qualified_group_letters = "".join(sorted(row["group_letter"] for row in ranked_third_places[:8]))
-    return THIRD_PLACE_COMBINATION_MAP.get(qualified_group_letters, {})
-
-
-def format_team_or_placeholder(value: str, owner_lookup: dict[str, str], include_owner: bool) -> str:
-    if value in owner_lookup:
-        formatted_team = format_team_with_flag(value)
-        return f"{formatted_team} ({owner_lookup[value]})" if include_owner else formatted_team
-    return value
-
-
-def resolve_playoff_slot_raw(
-    slot_code: str,
-    group_rankings: dict[str, list[str]],
-    third_place_assignments: dict[str, str],
-) -> str:
-    if re.fullmatch(r"[12][A-L]", slot_code):
-        position = int(slot_code[0]) - 1
-        group_name = f"Group {slot_code[1]}"
-        if group_name in group_rankings:
-            return group_rankings[group_name][position]
-        suffix = "st" if slot_code[0] == "1" else "nd"
-        return f"{slot_code[0]}{suffix} of {group_name}"
-
-    if re.fullmatch(r"3[A-L]+", slot_code):
-        groups = [f"Group {group_letter}" for group_letter in slot_code[1:]]
-        if len(groups) == 1 and groups[0] in group_rankings:
-            return group_rankings[groups[0]][2]
-        return f"Best 3rd from {' / '.join(groups)}"
-
-    if re.fullmatch(r"3P1[A-L]", slot_code):
-        winner_slot = slot_code[2:]
-        pool_letters = THIRD_PLACE_SLOT_POOLS[winner_slot]
-        assigned_group_letter = third_place_assignments.get(winner_slot)
-        if assigned_group_letter:
-            group_name = f"Group {assigned_group_letter}"
-            if group_name in group_rankings:
-                return group_rankings[group_name][2]
-        return f"Best 3rd from {' / '.join(f'Group {group_letter}' for group_letter in pool_letters)}"
-
-    if re.fullmatch(r"W\d{2,3}", slot_code):
-        return f"Winner of Match {slot_code[1:]}"
-
-    if re.fullmatch(r"L\d{2,3}", slot_code):
-        return f"Loser of Match {slot_code[1:]}"
-
-    return slot_code
-
-
-def build_playoff_tables(
-    standings: pd.DataFrame,
-    group_rankings: dict[str, list[str]],
-    owner_lookup: dict[str, str],
-) -> dict[str, pd.DataFrame]:
-    round_tables: dict[str, list[dict]] = {}
-    third_place_assignments = build_third_place_slot_assignments(standings, group_rankings)
-
-    for match in PLAYOFF_MATCHES:
-        raw_team_1 = resolve_playoff_slot_raw(match["team_1"], group_rankings, third_place_assignments)
-        raw_team_2 = resolve_playoff_slot_raw(match["team_2"], group_rankings, third_place_assignments)
-        round_tables.setdefault(match["round"], []).append(
-            {
-                "Match": match["match"],
-                "Date": match["date"],
-                "Team 1": format_team_or_placeholder(raw_team_1, owner_lookup, include_owner=False),
-                "Team 2": format_team_or_placeholder(raw_team_2, owner_lookup, include_owner=False),
-                "City": match["city"],
-            }
-        )
-
-    return {round_name: pd.DataFrame(rows) for round_name, rows in round_tables.items()}
-
-
-def build_playoff_fixture_table(
-    standings: pd.DataFrame,
-    group_rankings: dict[str, list[str]],
-    owner_lookup: dict[str, str],
-) -> pd.DataFrame:
-    third_place_assignments = build_third_place_slot_assignments(standings, group_rankings)
-    rows = []
-
-    for match in PLAYOFF_MATCHES:
-        raw_team_1 = resolve_playoff_slot_raw(match["team_1"], group_rankings, third_place_assignments)
-        raw_team_2 = resolve_playoff_slot_raw(match["team_2"], group_rankings, third_place_assignments)
-        rows.append(
-            {
-                "Date": match["date"],
-                "Time (Denmark)": "-",
-                "Team 1 (Owner)": format_team_or_placeholder(raw_team_1, owner_lookup, include_owner=True),
-                "Team 2 (Owner)": format_team_or_placeholder(raw_team_2, owner_lookup, include_owner=True),
-                "City": match["city"],
-                "Score": "-",
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def parse_games_payload(payload: dict, owner_lookup: dict[str, str]) -> pd.DataFrame:
-    rows = payload.get("events") or []
-    parsed_rows = []
-
-    for row in rows:
-        home_team = canonical_team_name(row.get("strHomeTeam") or "-")
-        away_team = canonical_team_name(row.get("strAwayTeam") or "-")
-        date_value, time_value = parse_denmark_kickoff(row.get("dateEvent"), row.get("strTime"))
-        home_score = row.get("intHomeScore")
-        away_score = row.get("intAwayScore")
-
-        parsed_rows.append(
-            {
-                "Date": date_value,
-                "Time (Denmark)": time_value,
-                "Team 1 (Owner)": f"{format_team_with_flag(home_team)} ({owner_lookup.get(home_team, 'Unassigned')})",
-                "Team 2 (Owner)": f"{format_team_with_flag(away_team)} ({owner_lookup.get(away_team, 'Unassigned')})",
-                "City": row.get("strCity") or row.get("strVenue") or "-",
-                "Score": "-" if home_score is None or away_score is None else f"{home_score}-{away_score}",
-            }
-        )
-
-    return pd.DataFrame(parsed_rows)
 
 
 def empty_fixtures() -> pd.DataFrame:
@@ -1446,49 +935,49 @@ def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[
     if football_data_loaded and not football_data_fixtures.empty:
         return football_data_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
 
-    _wiki_standings, wiki_matches = load_wikipedia_group_stage_data(day_key)
-    if not wiki_matches.empty:
-        wikipedia_fixtures = build_fixture_table_from_matches(wiki_matches, owner_lookup)
-        if not wikipedia_fixtures.empty:
-            return wikipedia_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
-
-    try:
-        payload = fetch_json(LIVE_SEASON_GAMES_URL, day_key)
-        fixtures = parse_games_payload(payload, owner_lookup)
-        if not fixtures.empty:
-            return fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True), True
-    except (URLError, TimeoutError, OSError, ValueError):
-        pass
     return empty_fixtures(), False
 
 
 def load_live_dashboard_data(
     owners: pd.DataFrame,
     owner_lookup: dict[str, str],
-) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame], pd.DataFrame, bool, bool]:
-    refresh_key = current_refresh_key(REFRESH_INTERVAL_SECONDS)
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame, bool, bool]:
+    refresh_key = get_live_refresh_key()
     standings, standings_loaded = load_standings(refresh_key)
+    matches, matches_loaded = load_football_data_matches(refresh_key)
+    group_lookup = build_team_group_lookup(matches)
 
     if standings_loaded:
+        standings = apply_group_lookup_to_standings(standings, group_lookup)
         owner_league_table = build_owner_league_table(owners, standings)
         group_tables = build_group_tables(standings, owner_lookup)
-        group_rankings = build_group_rankings(standings)
-        playoff_tables = build_playoff_tables(standings, group_rankings, owner_lookup)
-        playoff_fixtures = build_playoff_fixture_table(standings, group_rankings, owner_lookup)
     else:
         owner_league_table = pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
         group_tables = {}
-        playoff_tables = {}
-        playoff_fixtures = empty_fixtures()
 
-    upcoming_fixtures, fixtures_loaded = load_upcoming_fixtures(owner_lookup, refresh_key)
-    if fixtures_loaded and standings_loaded and not playoff_fixtures.empty:
-        upcoming_fixtures = pd.concat([upcoming_fixtures, playoff_fixtures], ignore_index=True)
+    if matches_loaded and not matches.empty:
+        upcoming_fixtures = build_fixture_table_from_matches(matches, owner_lookup)
+        fixtures_loaded = not upcoming_fixtures.empty
+    else:
+        upcoming_fixtures = empty_fixtures()
+        fixtures_loaded = False
 
     if not upcoming_fixtures.empty:
         upcoming_fixtures = upcoming_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True)
 
-    return owner_league_table, group_tables, playoff_tables, upcoming_fixtures, standings_loaded, fixtures_loaded
+    return owner_league_table, group_tables, upcoming_fixtures, standings_loaded, fixtures_loaded
+
+
+@st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
+def render_refresh_controls() -> None:
+    get_live_refresh_key()
+    st.markdown(
+        f'<div class="refresh-note">Last updated<br><span>{format_last_refreshed_at()}</span></div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Update now", key="manual_live_refresh", use_container_width=True):
+        request_manual_refresh()
+        st.rerun()
 
 
 render_styles()
@@ -1499,7 +988,11 @@ owner_lookup = dict(zip(owners["team"], owners["player"]))
 chat_owner_options = build_chat_owner_options(owners)
 chat_messages = load_chat_messages()
 
-st.markdown('<div class="title-wrap"><h1>TIA X World Cup 26</h1></div>', unsafe_allow_html=True)
+header_title_column, header_refresh_column = st.columns([1.7, 0.7])
+with header_title_column:
+    st.markdown('<div class="title-wrap"><h1>TIA X World Cup 26</h1></div>', unsafe_allow_html=True)
+with header_refresh_column:
+    render_refresh_controls()
 
 left_column, right_column = st.columns([1.55, 1])
 
@@ -1508,7 +1001,6 @@ def render_league_fragment() -> None:
     (
         owner_league_table,
         _group_tables,
-        _playoff_tables,
         _upcoming_fixtures,
         standings_loaded,
         _fixtures_loaded,
@@ -1517,7 +1009,7 @@ def render_league_fragment() -> None:
     if standings_loaded:
         render_html_table(owner_league_table, {"W", "D", "L", "GF", "Points"})
     else:
-        st.info("Loading live standings...")
+        st.info(live_unavailable_message("standings"))
 
 
 @st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
@@ -1525,7 +1017,6 @@ def render_schedule_fragment() -> None:
     (
         _owner_league_table,
         group_tables,
-        playoff_tables,
         upcoming_fixtures,
         standings_loaded,
         fixtures_loaded,
@@ -1581,7 +1072,7 @@ def render_schedule_fragment() -> None:
         daily_games = upcoming_fixtures[upcoming_fixtures["Date"] == selected_fixture_date].reset_index(drop=True)
         render_html_table(daily_games, set())
     else:
-        st.info("Loading fixtures from live sources...")
+        st.info(live_unavailable_message("fixtures"))
 
     st.markdown('<div class="section-title">Group Tables</div>', unsafe_allow_html=True)
     group_names = list(group_tables.keys())
@@ -1595,15 +1086,8 @@ def render_schedule_fragment() -> None:
                     render_html_table(group_tables[group_name], {"P", "W", "D", "L", "GD", "Pts"}, table_class="")
                     st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.info("Loading group standings from live sources...")
+        st.info(live_unavailable_message("group standings"))
 
-    st.markdown('<div class="section-title">Playoffs</div>', unsafe_allow_html=True)
-    if standings_loaded and playoff_tables:
-        for round_name, round_table in playoff_tables.items():
-            st.markdown(f"<div style='font-weight:700; color:#0f172a; margin:0.4rem 0 0.55rem 0;'>{round_name}</div>", unsafe_allow_html=True)
-            render_html_table(round_table, {"Match"}, table_class="table-card")
-    else:
-        st.info("Loading playoff picture from live standings...")
 
 with left_column:
     render_league_fragment()
@@ -1651,5 +1135,5 @@ with right_column:
 render_schedule_fragment()
 
 st.caption(
-    f"Owner assignments are read directly from owners.csv. If `FOOTBALL_DATA_API_TOKEN` is set, the app uses football-data.org's `WC` competition endpoints first; otherwise it falls back to Wikipedia group pages and then TheSportsDB. Data refreshes every {REFRESH_INTERVAL_SECONDS} seconds. Playoff rows remain template placeholders until knockout pairings are known."
+    f"Owner assignments are read from owners.csv, but teams and groups are shown only when returned by football-data.org's live `WC` endpoints. Data refreshes every {REFRESH_INTERVAL_SECONDS // 60} minutes or when Update now is clicked."
 )
