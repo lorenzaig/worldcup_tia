@@ -140,7 +140,7 @@ POINTS_RULES = [
 STANDINGS_COLUMNS = ["group", "team", "played", "won", "drawn", "lost", "gf", "gd", "points"]
 OWNER_LEAGUE_COLUMNS = ["Owner", "Teams", "W", "D", "L", "GF", "Points"]
 FIXTURE_COLUMNS = ["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]
-MATCH_COLUMNS = ["date", "time", "group", "home_team", "away_team", "city", "home_score", "away_score"]
+MATCH_COLUMNS = ["date", "time", "group", "status", "home_team", "away_team", "city", "home_score", "away_score"]
 
 
 def render_styles() -> None:
@@ -259,6 +259,23 @@ def render_styles() -> None:
             }
             .flag-tooltip:last-child {
                 margin-right: 0;
+            }
+            .flag-tooltip.flag-out .flag-icon {
+                opacity: 0.52;
+                filter: grayscale(0.65);
+            }
+            .flag-tooltip.flag-out::before {
+                content: "";
+                position: absolute;
+                left: -2px;
+                top: -3px;
+                width: 26px;
+                height: 22px;
+                background:
+                    linear-gradient(45deg, transparent calc(50% - 1.6px), #dc2626 calc(50% - 1.6px), #dc2626 calc(50% + 1.6px), transparent calc(50% + 1.6px)),
+                    linear-gradient(-45deg, transparent calc(50% - 1.6px), #dc2626 calc(50% - 1.6px), #dc2626 calc(50% + 1.6px), transparent calc(50% + 1.6px));
+                pointer-events: none;
+                z-index: 2;
             }
             .flag-tooltip::after {
                 content: attr(data-tooltip);
@@ -473,22 +490,27 @@ def canonical_team_name(team_name: Optional[str]) -> str:
 
 
 
-def flag_icon(team_name: str) -> str:
+def flag_icon(team_name: str, is_out: bool = False) -> str:
     canonical_name = canonical_team_name(team_name)
     country_code = TEAM_FLAGS.get(canonical_name)
     if not country_code:
         return ""
+
+    class_name = "flag-tooltip flag-out" if is_out else "flag-tooltip"
+    tooltip = f"{canonical_name} - out" if is_out else canonical_name
+    escaped_name = html.escape(canonical_name, quote=True)
+    escaped_tooltip = html.escape(tooltip, quote=True)
     return (
-        f'<span class="flag-tooltip" data-tooltip="{canonical_name}">'
+        f'<span class="{class_name}" data-tooltip="{escaped_tooltip}">'
         f'<img class="flag-icon" src="https://flagcdn.com/24x18/{country_code}.png" '
-        f'alt="{canonical_name} flag">'
+        f'alt="{escaped_name} flag">'
         f"</span>"
     )
 
 
-def format_team_with_flag(team_name: str) -> str:
+def format_team_with_flag(team_name: str, is_out: bool = False) -> str:
     canonical_name = canonical_team_name(team_name)
-    icon = flag_icon(canonical_name)
+    icon = flag_icon(canonical_name, is_out)
     return f"{icon} {canonical_name}".strip()
 
 
@@ -714,6 +736,35 @@ def apply_group_lookup_to_standings(standings: pd.DataFrame, group_lookup: dict[
     return live_standings
 
 
+ACTIVE_MATCH_STATUSES = {"SCHEDULED", "TIMED", "IN_PLAY", "PAUSED", "POSTPONED", "SUSPENDED"}
+COMPLETED_MATCH_STATUSES = {"FINISHED", "AWARDED"}
+
+
+def teams_in_match_rows(matches: pd.DataFrame) -> set[str]:
+    teams = set()
+    for team_column in ("home_team", "away_team"):
+        for team_name in matches.get(team_column, pd.Series(dtype="object")):
+            canonical_name = canonical_team_name(team_name)
+            if canonical_name and canonical_name != "-":
+                teams.add(canonical_name)
+    return teams
+
+
+def build_eliminated_team_set(matches: pd.DataFrame) -> set[str]:
+    if matches.empty or "status" not in matches.columns:
+        return set()
+
+    match_statuses = matches["status"].fillna("").astype(str).str.upper()
+    active_match_mask = match_statuses.isin(ACTIVE_MATCH_STATUSES)
+    completed_match_mask = match_statuses.isin(COMPLETED_MATCH_STATUSES)
+    if not active_match_mask.any() or not completed_match_mask.any():
+        return set()
+
+    teams_with_completed_matches = teams_in_match_rows(matches.loc[completed_match_mask])
+    teams_with_active_matches = teams_in_match_rows(matches.loc[active_match_mask])
+    return teams_with_completed_matches - teams_with_active_matches
+
+
 def build_fixture_table_from_matches(matches: pd.DataFrame, owner_lookup: dict[str, str]) -> pd.DataFrame:
     if matches.empty:
         return pd.DataFrame(columns=["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"])
@@ -796,6 +847,7 @@ def parse_football_data_matches_payload(payload: dict) -> pd.DataFrame:
                 "date": denmark_date,
                 "time": denmark_time,
                 "group": group_letter_from_api(row.get("group")),
+                "status": str(row.get("status") or "").upper(),
                 "home_team": home_team,
                 "away_team": away_team,
                 "city": row.get("venue") or "-",
@@ -857,7 +909,11 @@ def load_football_data_fixtures(owner_lookup: dict[str, str], day_key: str) -> t
 def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
     return load_football_data_standings(day_key)
 
-def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> pd.DataFrame:
+def build_owner_league_table(
+    owners: pd.DataFrame,
+    standings: pd.DataFrame,
+    eliminated_teams: set[str],
+) -> pd.DataFrame:
     merged = owners.merge(standings[["team", "won", "drawn", "lost", "gf", "points"]], on="team", how="inner")
     if merged.empty:
         return pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
@@ -872,7 +928,13 @@ def build_owner_league_table(owners: pd.DataFrame, standings: pd.DataFrame) -> p
     league_table = (
         merged.groupby("player", as_index=False)
         .agg(
-            Teams=("team", lambda teams: " ".join(flag_icon(team) for team in sorted(pd.unique(teams)))),
+            Teams=(
+                "team",
+                lambda teams: " ".join(
+                    flag_icon(team, canonical_team_name(team) in eliminated_teams)
+                    for team in sorted(pd.unique(teams))
+                ),
+            ),
             W=("won", "sum"),
             D=("drawn", "sum"),
             L=("lost", "sum"),
@@ -946,10 +1008,11 @@ def load_live_dashboard_data(
     standings, standings_loaded = load_standings(refresh_key)
     matches, matches_loaded = load_football_data_matches(refresh_key)
     group_lookup = build_team_group_lookup(matches)
+    eliminated_teams = build_eliminated_team_set(matches) if matches_loaded else set()
 
     if standings_loaded:
         standings = apply_group_lookup_to_standings(standings, group_lookup)
-        owner_league_table = build_owner_league_table(owners, standings)
+        owner_league_table = build_owner_league_table(owners, standings, eliminated_teams)
         group_tables = build_group_tables(standings, owner_lookup)
     else:
         owner_league_table = pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
