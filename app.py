@@ -138,9 +138,21 @@ POINTS_RULES = [
 ]
 
 STANDINGS_COLUMNS = ["group", "team", "played", "won", "drawn", "lost", "gf", "gd", "points"]
-OWNER_LEAGUE_COLUMNS = ["Owner", "Teams", "W", "D", "L", "GF", "Points"]
+TEAM_STATS_COLUMNS = ["team", "played", "won", "drawn", "lost", "gf", "points"]
+OWNER_LEAGUE_COLUMNS = ["Owner", "Teams", "Games Played", "W", "D", "L", "GF", "Points"]
 FIXTURE_COLUMNS = ["Date", "Time (Denmark)", "Team 1 (Owner)", "Team 2 (Owner)", "City", "Score"]
-MATCH_COLUMNS = ["date", "time", "group", "status", "home_team", "away_team", "city", "home_score", "away_score"]
+MATCH_COLUMNS = [
+    "date",
+    "time",
+    "group",
+    "status",
+    "home_team",
+    "away_team",
+    "city",
+    "home_score",
+    "away_score",
+    "winner",
+]
 
 
 def render_styles() -> None:
@@ -699,6 +711,10 @@ def empty_matches() -> pd.DataFrame:
     return pd.DataFrame(columns=MATCH_COLUMNS)
 
 
+def empty_team_stats() -> pd.DataFrame:
+    return pd.DataFrame(columns=TEAM_STATS_COLUMNS)
+
+
 def group_letter_from_api(group_name: Optional[str]) -> str:
     return (group_name or "").replace("GROUP_", "").strip()
 
@@ -763,6 +779,87 @@ def build_eliminated_team_set(matches: pd.DataFrame) -> set[str]:
     teams_with_completed_matches = teams_in_match_rows(matches.loc[completed_match_mask])
     teams_with_active_matches = teams_in_match_rows(matches.loc[active_match_mask])
     return teams_with_completed_matches - teams_with_active_matches
+
+
+def score_to_int(score_value: object) -> Optional[int]:
+    if pd.isna(score_value):
+        return None
+    try:
+        return int(score_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def match_result_counts(home_score: int, away_score: int, winner: str) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    winner = winner.upper()
+    if winner in {"HOME", "HOME_TEAM"}:
+        return (1, 0, 0), (0, 0, 1)
+    if winner in {"AWAY", "AWAY_TEAM"}:
+        return (0, 0, 1), (1, 0, 0)
+    if winner == "DRAW" or home_score == away_score:
+        return (0, 1, 0), (0, 1, 0)
+    if home_score > away_score:
+        return (1, 0, 0), (0, 0, 1)
+    return (0, 0, 1), (1, 0, 0)
+
+
+def build_team_stats_from_matches(matches: pd.DataFrame) -> pd.DataFrame:
+    if matches.empty or "status" not in matches.columns:
+        return empty_team_stats()
+
+    match_statuses = matches["status"].fillna("").astype(str).str.upper()
+    completed_matches = matches.loc[match_statuses.isin(COMPLETED_MATCH_STATUSES)]
+    team_rows = []
+
+    for _, match in completed_matches.iterrows():
+        home_score = score_to_int(match.get("home_score"))
+        away_score = score_to_int(match.get("away_score"))
+        if home_score is None or away_score is None:
+            continue
+
+        home_team = canonical_team_name(match.get("home_team"))
+        away_team = canonical_team_name(match.get("away_team"))
+        home_record, away_record = match_result_counts(home_score, away_score, str(match.get("winner") or ""))
+
+        for team_name, goals_for, record in (
+            (home_team, home_score, home_record),
+            (away_team, away_score, away_record),
+        ):
+            if not team_name or team_name == "-":
+                continue
+            won, drawn, lost = record
+            team_rows.append(
+                {
+                    "team": team_name,
+                    "played": 1,
+                    "won": won,
+                    "drawn": drawn,
+                    "lost": lost,
+                    "gf": goals_for,
+                    "points": (won * 3) + drawn,
+                }
+            )
+
+    if not team_rows:
+        return empty_team_stats()
+
+    return (
+        pd.DataFrame(team_rows, columns=TEAM_STATS_COLUMNS)
+        .groupby("team", as_index=False)
+        .sum(numeric_only=True)
+    )
+
+
+def build_team_stats_from_standings(standings: pd.DataFrame) -> pd.DataFrame:
+    if standings.empty:
+        return empty_team_stats()
+
+    team_stats = standings[TEAM_STATS_COLUMNS].copy()
+    numeric_columns = ["played", "won", "drawn", "lost", "gf", "points"]
+    for column in numeric_columns:
+        team_stats[column] = pd.to_numeric(team_stats[column], errors="coerce").fillna(0).astype(int)
+
+    return team_stats.groupby("team", as_index=False).sum(numeric_only=True)
 
 
 def build_fixture_table_from_matches(matches: pd.DataFrame, owner_lookup: dict[str, str]) -> pd.DataFrame:
@@ -836,11 +933,11 @@ def parse_football_data_matches_payload(payload: dict) -> pd.DataFrame:
         score = row.get("score") or {}
         regular_time = score.get("regularTime") or {}
         full_time = score.get("fullTime") or {}
-        home_score = regular_time.get("home")
-        away_score = regular_time.get("away")
+        home_score = full_time.get("home")
+        away_score = full_time.get("away")
         if home_score is None or away_score is None:
-            home_score = full_time.get("home")
-            away_score = full_time.get("away")
+            home_score = regular_time.get("home")
+            away_score = regular_time.get("away")
 
         match_rows.append(
             {
@@ -853,6 +950,7 @@ def parse_football_data_matches_payload(payload: dict) -> pd.DataFrame:
                 "city": row.get("venue") or "-",
                 "home_score": home_score,
                 "away_score": away_score,
+                "winner": str(score.get("winner") or "").upper(),
             }
         )
 
@@ -911,18 +1009,19 @@ def load_standings(day_key: str) -> tuple[pd.DataFrame, bool]:
 
 def build_owner_league_table(
     owners: pd.DataFrame,
-    standings: pd.DataFrame,
+    team_stats: pd.DataFrame,
     eliminated_teams: set[str],
 ) -> pd.DataFrame:
-    merged = owners.merge(standings[["team", "won", "drawn", "lost", "gf", "points"]], on="team", how="inner")
-    if merged.empty:
+    if owners.empty:
         return pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
 
-    merged["won"] = merged["won"].astype(int)
-    merged["drawn"] = merged["drawn"].astype(int)
-    merged["lost"] = merged["lost"].astype(int)
-    merged["points"] = merged["points"].astype(int)
-    merged["gf"] = merged["gf"].astype(int)
+    if team_stats.empty:
+        team_stats = empty_team_stats()
+
+    merged = owners.merge(team_stats[TEAM_STATS_COLUMNS], on="team", how="left")
+    numeric_columns = ["played", "won", "drawn", "lost", "gf", "points"]
+    for column in numeric_columns:
+        merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0).astype(int)
     merged["owner_points"] = merged["points"] + merged["gf"]
 
     league_table = (
@@ -935,17 +1034,20 @@ def build_owner_league_table(
                     for team in sorted(pd.unique(teams))
                 ),
             ),
-            W=("won", "sum"),
-            D=("drawn", "sum"),
-            L=("lost", "sum"),
-            GF=("gf", "sum"),
-            Points=("owner_points", "sum"),
+            **{
+                "Games Played": ("played", "sum"),
+                "W": ("won", "sum"),
+                "D": ("drawn", "sum"),
+                "L": ("lost", "sum"),
+                "GF": ("gf", "sum"),
+                "Points": ("owner_points", "sum"),
+            },
         )
         .rename(columns={"player": "Owner"})
         .sort_values(["Points", "GF", "W", "Owner"], ascending=[False, False, False, True])
         .reset_index(drop=True)
     )
-    return league_table[["Owner", "Teams", "W", "D", "L", "GF", "Points"]]
+    return league_table[OWNER_LEAGUE_COLUMNS]
 
 
 def build_group_tables(standings: pd.DataFrame, owner_lookup: dict[str, str]) -> dict[str, pd.DataFrame]:
@@ -1003,7 +1105,7 @@ def load_upcoming_fixtures(owner_lookup: dict[str, str], day_key: str) -> tuple[
 def load_live_dashboard_data(
     owners: pd.DataFrame,
     owner_lookup: dict[str, str],
-) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame, bool, bool]:
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame, bool, bool, bool]:
     refresh_key = get_live_refresh_key()
     standings, standings_loaded = load_standings(refresh_key)
     matches, matches_loaded = load_football_data_matches(refresh_key)
@@ -1012,11 +1114,21 @@ def load_live_dashboard_data(
 
     if standings_loaded:
         standings = apply_group_lookup_to_standings(standings, group_lookup)
-        owner_league_table = build_owner_league_table(owners, standings, eliminated_teams)
         group_tables = build_group_tables(standings, owner_lookup)
     else:
-        owner_league_table = pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
         group_tables = {}
+
+    if matches_loaded and not matches.empty:
+        team_stats = build_team_stats_from_matches(matches)
+        owner_league_table = build_owner_league_table(owners, team_stats, eliminated_teams)
+        league_loaded = True
+    elif standings_loaded:
+        team_stats = build_team_stats_from_standings(standings)
+        owner_league_table = build_owner_league_table(owners, team_stats, eliminated_teams)
+        league_loaded = True
+    else:
+        owner_league_table = pd.DataFrame(columns=OWNER_LEAGUE_COLUMNS)
+        league_loaded = False
 
     if matches_loaded and not matches.empty:
         upcoming_fixtures = build_fixture_table_from_matches(matches, owner_lookup)
@@ -1028,7 +1140,7 @@ def load_live_dashboard_data(
     if not upcoming_fixtures.empty:
         upcoming_fixtures = upcoming_fixtures.sort_values(["Date", "Time (Denmark)", "City"]).reset_index(drop=True)
 
-    return owner_league_table, group_tables, upcoming_fixtures, standings_loaded, fixtures_loaded
+    return owner_league_table, group_tables, upcoming_fixtures, league_loaded, standings_loaded, fixtures_loaded
 
 
 @st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
@@ -1065,14 +1177,15 @@ def render_league_fragment() -> None:
         owner_league_table,
         _group_tables,
         _upcoming_fixtures,
-        standings_loaded,
+        league_loaded,
+        _standings_loaded,
         _fixtures_loaded,
     ) = load_live_dashboard_data(owners, owner_lookup)
     st.markdown('<div class="section-title">League Table</div>', unsafe_allow_html=True)
-    if standings_loaded:
-        render_html_table(owner_league_table, {"W", "D", "L", "GF", "Points"})
+    if league_loaded:
+        render_html_table(owner_league_table, {"Games Played", "W", "D", "L", "GF", "Points"})
     else:
-        st.info(live_unavailable_message("standings"))
+        st.info(live_unavailable_message("match data"))
 
 
 @st.fragment(run_every=f"{REFRESH_INTERVAL_SECONDS}s")
@@ -1081,6 +1194,7 @@ def render_schedule_fragment() -> None:
         _owner_league_table,
         group_tables,
         upcoming_fixtures,
+        _league_loaded,
         standings_loaded,
         fixtures_loaded,
     ) = load_live_dashboard_data(owners, owner_lookup)
